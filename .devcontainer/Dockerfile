@@ -1,6 +1,6 @@
-FROM golang:1.24 AS go
+FROM golang:1.26 AS go
 
-FROM ubuntu:24.04
+FROM debian:13
 
 ENV TZ="UTC"
 RUN echo "${TZ}" > /etc/timezone
@@ -15,7 +15,7 @@ RUN apt-get install -y --no-install-recommends \
     zip gnupg gcc g++ htop wrk zstd upx gdb dnsutils jq b3sum \
     musl musl-dev musl-tools libc6-dev clang libclang-dev lld \
     # useful data. mailcap for mimetypes. tzdata for timezones.
-    mailcap tzdata libpcre3-dev
+    mailcap tzdata libpcre2-dev
 
 # Setup dev user
 ARG USERNAME=dev
