@@ -14,6 +14,7 @@ RUN apt-get install -y --no-install-recommends \
     git vim make binutils coreutils cmake build-essential pkg-config \
     zip gnupg gcc g++ htop wrk zstd upx gdb dnsutils jq b3sum \
     musl musl-dev musl-tools libc6-dev clang libclang-dev lld \
+    python3 python3-pip pipx \
     # useful data. mailcap for mimetypes. tzdata for timezones.
     mailcap tzdata libpcre2-dev
 

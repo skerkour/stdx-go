@@ -15,8 +15,8 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/skerkour/stdx-go/deprecated/text/colwriter"
 	"github.com/creack/pty"
+	"github.com/skerkour/stdx-go/deprecated/text/colwriter"
 )
 
 func main() {

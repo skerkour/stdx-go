@@ -9,12 +9,12 @@ import (
 	"net/http"
 	"path/filepath"
 
-	"github.com/skerkour/stdx-go/storage"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/skerkour/stdx-go/storage"
 )
 
 // ensure that Client satisfies the Storage interface

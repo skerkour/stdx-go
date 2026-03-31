@@ -127,7 +127,7 @@ func (pgqueue *PostgreSQLQueue) PushMany(ctx context.Context, tx db.Tx, newJobs 
 	//
 	// But for now we use smaller batch size to reduce the amount of used memory.
 	// TODO: use UNNEST
-	BATCH_SIZE :=  POSTGRES_MAX_QUERY_PARAMS/jobNumberOfColumns
+	BATCH_SIZE := POSTGRES_MAX_QUERY_PARAMS / jobNumberOfColumns
 
 	now := time.Now().UTC()
 	var err error

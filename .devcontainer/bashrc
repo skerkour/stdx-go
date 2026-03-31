@@ -12,4 +12,5 @@ go telemetry off
 
 export TZ="UTC"
 export DO_NOT_TRACK=1
-export PATH="$PATH:$GOROOT/bin:$GOPATH/bin"
+
+export PATH="$PATH:$GOROOT/bin:$GOPATH/bin:$HOME/.local/bin:$HOME/.npm/bin"
