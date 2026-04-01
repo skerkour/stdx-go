@@ -139,12 +139,6 @@ func sliceForAppend(in []byte, n int) (head, tail []byte) {
 	return
 }
 
-func writeUint64(p *blake3.Hasher, n uint64) {
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], n)
-	p.Write(buf[:])
-}
-
 func writeUint64LittleEndian(p *blake3.Hasher, n uint64) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], n)
