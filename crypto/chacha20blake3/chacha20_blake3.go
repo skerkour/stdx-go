@@ -13,22 +13,18 @@ import (
 
 const (
 	KeySize   = 32
-	NonceSize = 32
+	NonceSize = 24
 	TagSize   = 32
-
-	encryptionKeyContext     = "ChaCha20-BLAKE3 encryption key"
-	authenticationKeyContext = "ChaCha20-BLAKE3 authentication key"
 )
 
 var (
 	ErrOpen           = errors.New("chacha20blake3: error decrypting ciphertext")
-	ErrBadKeyLength   = errors.New("chacha20blake3: bad key length for ChaCha20Blake3. 32 bytes required")
-	ErrBadNonceLength = errors.New("chacha20blake3: bad nonce length for ChaCha20Blake3. 32 bytes required")
+	ErrBadKeyLength   = errors.New("chacha20blake3: bad key length for ChaCha20Blake3. 24 bytes required")
+	ErrBadNonceLength = errors.New("chacha20blake3: bad nonce length for ChaCha20Blake3. 24 bytes required")
 )
 
 type ChaCha20Blake3 struct {
-	key           [KeySize]byte
-	encryptionKey [chacha20.KeySize]byte
+	key [KeySize]byte
 }
 
 // ensure that ChaCha20Blake3 implements `cipher.AEAD` interface at build time
@@ -42,9 +38,6 @@ func New(key []byte) (*ChaCha20Blake3, error) {
 	var ret ChaCha20Blake3
 	copy(ret.key[:], key)
 
-	// pre-compute the encryption key
-	blake3.DeriveKey(ret.encryptionKey[:], encryptionKeyContext, key)
-
 	return &ret, nil
 }
 
@@ -56,32 +49,30 @@ func (*ChaCha20Blake3) Overhead() int {
 	return TagSize
 }
 
-func (cipher *ChaCha20Blake3) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
-	var authenticationKey [32]byte
-
+func (cipher *ChaCha20Blake3) Seal(dst, nonce, plaintext, associatedData []byte) []byte {
 	if len(nonce) != NonceSize {
 		panic(ErrBadNonceLength)
 	}
 
-	var authenticationKeyMaterial [KeySize + NonceSize]byte
-	copy(authenticationKeyMaterial[:], nonce)
-	copy(authenticationKeyMaterial[len(nonce):], cipher.key[:])
-	blake3.DeriveKey(authenticationKey[:], authenticationKeyContext, authenticationKeyMaterial[:])
+	var kdfOutput [72]byte
+	kdf := blake3.New(72, cipher.key[:])
+	kdf.Write(nonce)
+	kdf.Sum(kdfOutput[:0])
+
+	chachaKey := kdfOutput[0:32]
+	authenticationKey := kdfOutput[32:64]
+	chachaNonce := kdfOutput[64:72]
 
 	ret, out := sliceForAppend(dst, len(plaintext)+TagSize)
 	ciphertext, tag := out[:len(plaintext)], out[len(plaintext):]
 
-	chacha20Cipher, _ := chacha20.New(cipher.encryptionKey[:], nonce[:8])
-	// chacha20Cipher, _ := chacha20.NewUnauthenticatedCipher(encryptionKey[:], nonce[20:32])
+	chacha20Cipher, _ := chacha20.New(chachaKey, chachaNonce)
 	chacha20Cipher.XORKeyStream(ciphertext, plaintext)
 
-	// _ = tag
-	macHasher := blake3.New(32, authenticationKey[:])
-	macHasher.Write(additionalData)
-	writeUint64LittleEndian(macHasher, uint64(len(additionalData)))
-	// macHasher.Write(nonce)
+	macHasher := blake3.New(32, authenticationKey)
+	macHasher.Write(associatedData)
+	writeUint64LittleEndian(macHasher, uint64(len(associatedData)))
 	macHasher.Write(ciphertext)
-	// writeUint64(macHasher, uint64(len(nonce)))
 	writeUint64LittleEndian(macHasher, uint64(len(ciphertext)))
 	macHasher.Sum(tag[:0])
 
@@ -90,25 +81,27 @@ func (cipher *ChaCha20Blake3) Seal(dst, nonce, plaintext, additionalData []byte)
 	return ret
 }
 
-func (cipher *ChaCha20Blake3) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error) {
-	var authenticationKey [32]byte
-
+func (cipher *ChaCha20Blake3) Open(dst, nonce, ciphertext, associatedData []byte) ([]byte, error) {
 	if len(nonce) != NonceSize {
 		panic(ErrBadNonceLength)
 	}
 
-	var authenticationKeyMaterial [KeySize + NonceSize]byte
-	copy(authenticationKeyMaterial[:], nonce)
-	copy(authenticationKeyMaterial[len(nonce):], cipher.key[:])
-	blake3.DeriveKey(authenticationKey[:], authenticationKeyContext, authenticationKeyMaterial[:])
-
 	tag := ciphertext[len(ciphertext)-TagSize:]
 	ciphertext = ciphertext[:len(ciphertext)-TagSize]
 
+	var kdfOutput [72]byte
+	kdf := blake3.New(72, cipher.key[:])
+	kdf.Write(nonce)
+	kdf.Sum(kdfOutput[:0])
+
+	chachaKey := kdfOutput[0:32]
+	authenticationKey := kdfOutput[32:64]
+	chachaNonce := kdfOutput[64:72]
+
 	var computedTag [TagSize]byte
 	macHasher := blake3.New(32, authenticationKey[:])
-	macHasher.Write(additionalData)
-	writeUint64LittleEndian(macHasher, uint64(len(additionalData)))
+	macHasher.Write(associatedData)
+	writeUint64LittleEndian(macHasher, uint64(len(associatedData)))
 	macHasher.Write(ciphertext)
 	writeUint64LittleEndian(macHasher, uint64(len(ciphertext)))
 	macHasher.Sum(computedTag[:0])
@@ -119,7 +112,7 @@ func (cipher *ChaCha20Blake3) Open(dst, nonce, ciphertext, additionalData []byte
 
 	ret, plaintext := sliceForAppend(dst, len(ciphertext))
 
-	chacha20Cipher, _ := chacha20.New(cipher.encryptionKey[:], nonce[:8])
+	chacha20Cipher, _ := chacha20.New(chachaKey, chachaNonce)
 	chacha20Cipher.XORKeyStream(plaintext, ciphertext)
 
 	zeroize(authenticationKey[:])
@@ -129,7 +122,6 @@ func (cipher *ChaCha20Blake3) Open(dst, nonce, ciphertext, additionalData []byte
 
 func (cipher *ChaCha20Blake3) Zeroize() {
 	zeroize(cipher.key[:])
-	zeroize(cipher.encryptionKey[:])
 }
 
 // sliceForAppend takes a slice and a requested number of bytes. It returns a
