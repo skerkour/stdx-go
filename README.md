@@ -6,8 +6,6 @@ The code is licensed under AGPL-3.0 (see `LICENSE.txt`)
 
 `ahocorasick` is a fork of https://github.com/cloudflare/ahocorasick commit 054963ec939627782012c7c34eefd2942488d4e1 - License:  BSD-3-Clause
 
-`automaxprocs` is a fork of https://github.com/uber-go/automaxprocs commit 1ea14c35ce47a73089b824e504d1c92eeb61a5a6 - License: MIT
-
 `barcode` is a fork of https://github.com/skerkour/stdx-go/barcode commit 4f5562c16b85a956bc8d650dc15344e1e1eb7c8c - License: MIT
 
 `base64` is a fork of https://github.com/segmentio/asm commit 1cfacc81a878d4a07b13f51f2368cd86893d23fa - License: MIT-0
