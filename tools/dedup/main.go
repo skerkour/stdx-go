@@ -77,7 +77,7 @@ func findDuplicates(folders []string) (err error) {
 	foundDuplicates := false
 
 	// Collect all duplicate groups
-	duplicateGroups := make([][]FileInfo, 0, len(fileMap))
+	duplicateGroups := make([][]FileInfo, 0, min(1, len(fileMap)/10))
 	for _, files := range fileMap {
 		if len(files) > 1 {
 			foundDuplicates = true
