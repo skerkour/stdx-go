@@ -76,7 +76,7 @@ func (cipher *ChaCha20Blake3) Seal(dst, nonce, plaintext, associatedData []byte)
 	writeUint64LittleEndian(macHasher, uint64(len(ciphertext)))
 	macHasher.Sum(tag[:0])
 
-	zeroize(authenticationKey[:])
+	zeroize(kdfOutput[:])
 
 	return ret
 }
@@ -115,7 +115,7 @@ func (cipher *ChaCha20Blake3) Open(dst, nonce, ciphertext, associatedData []byte
 	chacha20Cipher, _ := chacha20.New(chachaKey, chachaNonce)
 	chacha20Cipher.XORKeyStream(plaintext, ciphertext)
 
-	zeroize(authenticationKey[:])
+	zeroize(kdfOutput[:])
 
 	return ret, nil
 }
