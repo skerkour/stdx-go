@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -12,8 +13,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/skerkour/stdx-go/crypto/blake3"
 )
 
 var ErrDir = errors.New("path is a folder")
@@ -191,7 +190,7 @@ func loadFilesMetdata(folder fs.FS, config *WebappHandlerConfig) (ret map[string
 		defer file.Close()
 
 		// we hash the file to generate its Etag
-		hasher := blake3.New(32, nil)
+		hasher := sha256.New()
 		_, errWalk = io.Copy(hasher, file)
 		if errWalk != nil {
 			return fmt.Errorf("webappHandler: error hashing file %s: %w", path, errWalk)

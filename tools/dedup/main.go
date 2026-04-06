@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -8,8 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"github.com/zeebo/blake3"
 )
 
 type FileInfo struct {
@@ -42,7 +41,7 @@ func findDuplicates(folders []string) (err error) {
 				return nil
 			}
 
-			hash, err := computeBlake3Hash(path)
+			hash, err := hashFile(path)
 			if err != nil {
 				return fmt.Errorf("Error hashing file %s: %w\n", path, err)
 			}
@@ -109,7 +108,7 @@ func findDuplicates(folders []string) (err error) {
 	return nil
 }
 
-func computeBlake3Hash(filePath string) ([32]byte, error) {
+func hashFile(filePath string) ([32]byte, error) {
 	var hash [32]byte
 
 	file, err := os.Open(filePath)
@@ -118,7 +117,7 @@ func computeBlake3Hash(filePath string) ([32]byte, error) {
 	}
 	defer file.Close()
 
-	hasher := blake3.New()
+	hasher := sha256.New()
 	if _, err := io.Copy(hasher, file); err != nil {
 		return hash, err
 	}
