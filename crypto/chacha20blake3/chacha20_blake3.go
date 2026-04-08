@@ -6,20 +6,22 @@ import (
 	"encoding/binary"
 	"errors"
 
-	"github.com/skerkour/stdx-go/crypto/blake3"
 	"github.com/skerkour/stdx-go/crypto/chacha20"
+	"github.com/zeebo/blake3"
 )
 
 const (
 	KeySize   = 32
 	NonceSize = 24
 	TagSize   = 32
+
+	errInvalidBlake3Key = "chacha20blake3: internal error: invalid BLAKE3 key"
 )
 
 var (
 	ErrOpen           = errors.New("chacha20blake3: error decrypting ciphertext")
-	ErrBadKeyLength   = errors.New("chacha20blake3: bad key length for ChaCha20Blake3. 24 bytes required")
-	ErrBadNonceLength = errors.New("chacha20blake3: bad nonce length for ChaCha20Blake3. 24 bytes required")
+	ErrBadKeyLength   = errors.New("chacha20blake3: bad key length for ChaCha20-BLAKE3. 32 bytes required")
+	ErrBadNonceLength = errors.New("chacha20blake3: bad nonce length for ChaCha20-BLAKE3. 24 bytes required")
 )
 
 type ChaCha20Blake3 struct {
@@ -54,9 +56,12 @@ func (cipher *ChaCha20Blake3) Seal(dst, nonce, plaintext, associatedData []byte)
 	}
 
 	var kdfOutput [72]byte
-	kdf := blake3.New(72, cipher.key[:])
+	kdf, err := blake3.NewKeyed(cipher.key[:])
+	if err != nil {
+		panic(errInvalidBlake3Key)
+	}
 	kdf.Write(nonce)
-	kdf.Sum(kdfOutput[:0])
+	kdf.Digest().Read(kdfOutput[:])
 
 	chachaKey := kdfOutput[0:32]
 	authenticationKey := kdfOutput[32:64]
@@ -65,15 +70,21 @@ func (cipher *ChaCha20Blake3) Seal(dst, nonce, plaintext, associatedData []byte)
 	ret, out := sliceForAppend(dst, len(plaintext)+TagSize)
 	ciphertext, tag := out[:len(plaintext)], out[len(plaintext):]
 
-	chacha20Cipher, _ := chacha20.New(chachaKey, chachaNonce)
+	chacha20Cipher, err := chacha20.New(chachaKey, chachaNonce)
+	if err != nil {
+		panic(err)
+	}
 	chacha20Cipher.XORKeyStream(ciphertext, plaintext)
 
-	macHasher := blake3.New(32, authenticationKey)
+	macHasher, err := blake3.NewKeyed(authenticationKey)
+	if err != nil {
+		panic(errInvalidBlake3Key)
+	}
 	macHasher.Write(associatedData)
 	writeUint64LittleEndian(macHasher, uint64(len(associatedData)))
 	macHasher.Write(ciphertext)
 	writeUint64LittleEndian(macHasher, uint64(len(ciphertext)))
-	macHasher.Sum(tag[:0])
+	macHasher.Digest().Read(tag[:])
 
 	zeroize(kdfOutput[:])
 
@@ -89,21 +100,27 @@ func (cipher *ChaCha20Blake3) Open(dst, nonce, ciphertext, associatedData []byte
 	ciphertext = ciphertext[:len(ciphertext)-TagSize]
 
 	var kdfOutput [72]byte
-	kdf := blake3.New(72, cipher.key[:])
+	kdf, err := blake3.NewKeyed(cipher.key[:])
+	if err != nil {
+		panic(errInvalidBlake3Key)
+	}
 	kdf.Write(nonce)
-	kdf.Sum(kdfOutput[:0])
+	kdf.Digest().Read(kdfOutput[:])
 
 	chachaKey := kdfOutput[0:32]
 	authenticationKey := kdfOutput[32:64]
 	chachaNonce := kdfOutput[64:72]
 
 	var computedTag [TagSize]byte
-	macHasher := blake3.New(32, authenticationKey[:])
+	macHasher, err := blake3.NewKeyed(authenticationKey[:])
+	if err != nil {
+		panic(errInvalidBlake3Key)
+	}
 	macHasher.Write(associatedData)
 	writeUint64LittleEndian(macHasher, uint64(len(associatedData)))
 	macHasher.Write(ciphertext)
 	writeUint64LittleEndian(macHasher, uint64(len(ciphertext)))
-	macHasher.Sum(computedTag[:0])
+	macHasher.Digest().Read(computedTag[:])
 
 	if subtle.ConstantTimeCompare(computedTag[:], tag) != 1 {
 		return nil, ErrOpen
@@ -111,7 +128,10 @@ func (cipher *ChaCha20Blake3) Open(dst, nonce, ciphertext, associatedData []byte
 
 	ret, plaintext := sliceForAppend(dst, len(ciphertext))
 
-	chacha20Cipher, _ := chacha20.New(chachaKey, chachaNonce)
+	chacha20Cipher, err := chacha20.New(chachaKey, chachaNonce)
+	if err != nil {
+		panic(err)
+	}
 	chacha20Cipher.XORKeyStream(plaintext, ciphertext)
 
 	zeroize(kdfOutput[:])
