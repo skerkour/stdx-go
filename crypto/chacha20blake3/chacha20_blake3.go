@@ -86,8 +86,6 @@ func (cipher *ChaCha20Blake3) Seal(dst, nonce, plaintext, associatedData []byte)
 	writeUint64LittleEndian(macHasher, uint64(len(ciphertext)))
 	macHasher.Digest().Read(tag[:])
 
-	zeroize(kdfOutput[:])
-
 	return ret
 }
 
@@ -134,13 +132,7 @@ func (cipher *ChaCha20Blake3) Open(dst, nonce, ciphertext, associatedData []byte
 	}
 	chacha20Cipher.XORKeyStream(plaintext, ciphertext)
 
-	zeroize(kdfOutput[:])
-
 	return ret, nil
-}
-
-func (cipher *ChaCha20Blake3) Zeroize() {
-	zeroize(cipher.key[:])
 }
 
 // sliceForAppend takes a slice and a requested number of bytes. It returns a
@@ -162,10 +154,4 @@ func writeUint64LittleEndian(p *blake3.Hasher, n uint64) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], n)
 	p.Write(buf[:])
-}
-
-func zeroize(input []byte) {
-	for i := range input {
-		input[i] = 0
-	}
 }
