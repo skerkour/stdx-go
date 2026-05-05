@@ -31,16 +31,15 @@ func All() map[string]string {
 	return allCountries
 }
 
-func Name(countryCode string) (countryName string, err error) {
-	countryName = Unknown
-
+// Name returns the full name of a country for a given 2-letter country code.
+// If no country is found for the given country code, "Unknown" returned
+func Name(countryCode string) (string, error) {
 	countryName, exists := allCountries[countryCode]
 	if !exists || countryCode == CodeUnknown {
-		err = ErrCountryNotFound
-		return
+		return Unknown, ErrCountryNotFound
 	}
 
-	return
+	return countryName, nil
 }
 
 var allCountries = map[string]string{
