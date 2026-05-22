@@ -31,7 +31,6 @@ func TestGoTypeToTS(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			expr := parseExpr(t, tt.expr)
@@ -64,7 +63,6 @@ func TestParseJSONTag(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			gotName, gotOmitempty, gotSkip := parseJSONTag(tt.tag)
