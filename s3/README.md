@@ -111,10 +111,10 @@ docker run --rm -p 9000:9000 -p 9001:9001 \
   minio/minio server /data --console-address ":9001"
 ```
 
-Run integration tests:
+Run integration tests (from the `s3/` directory):
 
 ```bash
-make test_s3_integration
+make integration_test
 ```
 
 You can override credentials/endpoint/region with these env vars:

@@ -14,7 +14,7 @@ import (
 
 func TestMinIOIntegration(t *testing.T) {
 	endpoint := envOrDefault("S3_ENDPOINT", "http://127.0.0.1:9000")
-	region := envOrDefault("S3_REGION", "us-east-1")
+	region := envOrDefault("S3_REGION", "auto")
 	accessKeyID := envOrDefault("S3_ACCESS_KEY_ID", "minioadmin")
 	secretAccessKey := envOrDefault("S3_SECRET_ACCESS_KEY", "minioadmin")
 	sessionToken := os.Getenv("S3_SESSION_TOKEN")
