@@ -50,6 +50,7 @@ func main() {
 		}
 		for _, t := range types {
 			if seen[t.name] {
+				fmt.Fprintf(os.Stderr, "warning: duplicate type %q skipped (already generated from an earlier package)\n", t.name)
 				continue
 			}
 			seen[t.name] = true
@@ -58,7 +59,7 @@ func main() {
 		}
 	}
 
-	if err := os.WriteFile(outputFile, []byte(sb.String()), 0644); err != nil {
+	if err := os.WriteFile(outputFile, []byte(sb.String()), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "error writing output file: %v\n", err)
 		os.Exit(1)
 	}
@@ -195,8 +196,9 @@ func convertStruct(name string, s *ast.StructType) (*tsType, error) {
 		if skip {
 			continue
 		}
-		// If there's no json tag, use the Go field name as-is
-		// (matches encoding/json default behaviour)
+		// If there's no json tag, use the Go field name as-is.
+		// encoding/json marshals exported fields using their exact Go name when
+		// no json tag is present.
 		if jsonName == "" {
 			if len(field.Names) == 0 {
 				// Embedded struct — skip for now
@@ -268,8 +270,14 @@ func goTypeToTS(expr ast.Expr) (nullable bool, tsTypeName string) {
 		_, elemType := goTypeToTS(t.Elt)
 		return false, "Array<" + elemType + ">"
 	case *ast.MapType:
+		_, keyType := goTypeToTS(t.Key)
 		_, valueType := goTypeToTS(t.Value)
-		return false, "{ [key: string]: " + valueType + " }"
+		// TypeScript index signatures only support string and number key types.
+		tsKey := keyType
+		if tsKey != "string" && tsKey != "number" {
+			tsKey = "string"
+		}
+		return false, "{ [key: " + tsKey + "]: " + valueType + " }"
 	case *ast.InterfaceType:
 		return false, "any"
 	default:
