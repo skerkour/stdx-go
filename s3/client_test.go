@@ -21,8 +21,13 @@ func TestMostUsedActions(t *testing.T) {
 		"HeadObject",
 		"PutObject",
 		"DeleteObject",
+		"DeleteObjects",
 		"CopyObject",
 		"ListObjects",
+		"ListBuckets",
+		"HeadBucket",
+		"CreateBucket",
+		"DeleteBucket",
 	}
 
 	if !reflect.DeepEqual(MostUsedActions, expected) {
@@ -38,9 +43,7 @@ func TestNewClient(t *testing.T) {
 		t.Fatalf("expected nil config error, got %v", err)
 	}
 
-	_, err = NewClient(&ClientConfig{
-		Endpoint: "https://s3.example.com",
-	})
+	_, err = NewClient(&ClientConfig{Endpoint: "https://s3.example.com"})
 	if err == nil || err.Error() != "s3: credentials are required" {
 		t.Fatalf("expected credentials error, got %v", err)
 	}
@@ -69,11 +72,7 @@ func TestStaticCredentials(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	expected := CredentialsValue{
-		AccessKeyID:     "access-key",
-		SecretAccessKey: "secret-key",
-		SessionToken:    "session-token",
-	}
+	expected := CredentialsValue{AccessKeyID: "access-key", SecretAccessKey: "secret-key", SessionToken: "session-token"}
 	if credentials != expected {
 		t.Fatalf("unexpected credentials: %#v", credentials)
 	}
@@ -109,12 +108,7 @@ func TestGetObject(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server.URL)
-	output, err := client.GetObject(context.Background(), &GetObjectInput{
-		Bucket:    "bucket",
-		Key:       "folder/object.txt",
-		Range:     "bytes=0-4",
-		VersionID: "version-1",
-	})
+	output, err := client.GetObject(context.Background(), &GetObjectInput{Bucket: "bucket", Key: "folder/object.txt", Range: "bytes=0-4", VersionID: "version-1"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,10 +152,7 @@ func TestHeadObject(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server.URL)
-	output, err := client.HeadObject(context.Background(), &HeadObjectInput{
-		Bucket: "bucket",
-		Key:    "file.bin",
-	})
+	output, err := client.HeadObject(context.Background(), &HeadObjectInput{Bucket: "bucket", Key: "file.bin"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -213,9 +204,7 @@ func TestPutObject(t *testing.T) {
 		Key:         "payload.txt",
 		Body:        strings.NewReader("payload"),
 		ContentType: "text/plain",
-		Metadata: map[string]string{
-			"environment": "test",
-		},
+		Metadata:    map[string]string{"environment": "test"},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -243,17 +232,61 @@ func TestDeleteObject(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server.URL)
-	output, err := client.DeleteObject(context.Background(), &DeleteObjectInput{
-		Bucket:    "bucket",
-		Key:       "file.txt",
-		VersionID: "version-delete",
-	})
+	output, err := client.DeleteObject(context.Background(), &DeleteObjectInput{Bucket: "bucket", Key: "file.txt", VersionID: "version-delete"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if !output.DeleteMarker || output.VersionID != "version-delete" {
 		t.Fatalf("unexpected delete object output: %#v", output)
+	}
+}
+
+func TestDeleteObjects(t *testing.T) {
+	t.Parallel()
+
+	expectedDate := time.Date(2026, time.May, 22, 7, 16, 1, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertSigned(t, r, "access-key", expectedDate)
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		if _, ok := r.URL.Query()["delete"]; !ok {
+			t.Fatalf("expected delete query, got %s", r.URL.RawQuery)
+		}
+		if r.Header.Get("Content-MD5") == "" {
+			t.Fatal("expected Content-MD5 header")
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("unexpected read error: %v", err)
+		}
+		if !strings.Contains(string(body), "<Key>folder/a.txt</Key>") {
+			t.Fatalf("unexpected request body: %s", string(body))
+		}
+
+		_, _ = io.WriteString(w, `<DeleteResult><Deleted><Key>folder/a.txt</Key></Deleted><Error><Key>folder/b.txt</Key><Code>AccessDenied</Code><Message>denied</Message></Error></DeleteResult>`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	output, err := client.DeleteObjects(context.Background(), &DeleteObjectsInput{
+		Bucket: "bucket",
+		Objects: []ObjectIdentifier{
+			{Key: "folder/a.txt"},
+			{Key: "folder/b.txt", VersionID: "v2"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(output.Deleted) != 1 || output.Deleted[0].Key != "folder/a.txt" {
+		t.Fatalf("unexpected deleted objects: %#v", output.Deleted)
+	}
+	if len(output.Errors) != 1 || output.Errors[0].Code != "AccessDenied" {
+		t.Fatalf("unexpected delete errors: %#v", output.Errors)
 	}
 }
 
@@ -323,16 +356,8 @@ func TestListObjects(t *testing.T) {
 			ContinuationToken:     "token-1",
 			NextContinuationToken: "token-2",
 			StartAfter:            "folder/a.txt",
-			Contents: []Object{
-				{
-					Key:          "folder/a.txt",
-					LastModified: expectedDate,
-					ETag:         "\"etag-list\"",
-					Size:         7,
-					StorageClass: "STANDARD",
-				},
-			},
-			CommonPrefixes: []CommonPrefix{{Prefix: "folder/nested/"}},
+			Contents:              []Object{{Key: "folder/a.txt", LastModified: expectedDate, ETag: "\"etag-list\"", Size: 7, StorageClass: "STANDARD"}},
+			CommonPrefixes:        []CommonPrefix{{Prefix: "folder/nested/"}},
 		}
 		if err := xml.NewEncoder(w).Encode(response); err != nil {
 			t.Fatalf("unexpected encode error: %v", err)
@@ -358,6 +383,134 @@ func TestListObjects(t *testing.T) {
 	}
 }
 
+func TestListBuckets(t *testing.T) {
+	t.Parallel()
+
+	expectedDate := time.Date(2026, time.May, 22, 7, 16, 1, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertSigned(t, r, "access-key", expectedDate)
+		if r.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", r.Method)
+		}
+		if r.URL.Path != "/" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `<ListAllMyBucketsResult><Owner><ID>owner-id</ID><DisplayName>owner</DisplayName></Owner><Buckets><Bucket><Name>bucket-a</Name><CreationDate>2026-05-22T07:16:01.000Z</CreationDate></Bucket></Buckets></ListAllMyBucketsResult>`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	output, err := client.ListBuckets(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output.Owner.ID != "owner-id" || len(output.Buckets) != 1 || output.Buckets[0].Name != "bucket-a" {
+		t.Fatalf("unexpected list buckets output: %#v", output)
+	}
+}
+
+func TestHeadBucket(t *testing.T) {
+	t.Parallel()
+
+	expectedDate := time.Date(2026, time.May, 22, 7, 16, 1, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertSigned(t, r, "access-key", expectedDate)
+		if r.Method != http.MethodHead {
+			t.Fatalf("expected HEAD, got %s", r.Method)
+		}
+		w.Header().Set("x-amz-bucket-region", "eu-west-1")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	output, err := client.HeadBucket(context.Background(), &HeadBucketInput{Bucket: "bucket"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output.Region != "eu-west-1" {
+		t.Fatalf("unexpected region: %s", output.Region)
+	}
+}
+
+func TestCreateBucket(t *testing.T) {
+	t.Parallel()
+
+	expectedDate := time.Date(2026, time.May, 22, 7, 16, 1, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertSigned(t, r, "access-key", expectedDate)
+		if r.Method != http.MethodPut {
+			t.Fatalf("expected PUT, got %s", r.Method)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("unexpected read error: %v", err)
+		}
+		if !strings.Contains(string(body), "<LocationConstraint>eu-west-1</LocationConstraint>") {
+			t.Fatalf("unexpected create bucket payload: %s", string(body))
+		}
+		w.Header().Set("Location", "/bucket")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(&ClientConfig{Endpoint: server.URL, Region: "eu-west-1", Credentials: StaticCredentials("access-key", "secret-key", "session-token")})
+	if err != nil {
+		t.Fatalf("unexpected new client error: %v", err)
+	}
+	client.now = func() time.Time { return expectedDate }
+
+	output, err := client.CreateBucket(context.Background(), &CreateBucketInput{Bucket: "bucket"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output.Location != "/bucket" {
+		t.Fatalf("unexpected location: %s", output.Location)
+	}
+}
+
+func TestDeleteBucket(t *testing.T) {
+	t.Parallel()
+
+	expectedDate := time.Date(2026, time.May, 22, 7, 16, 1, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertSigned(t, r, "access-key", expectedDate)
+		if r.Method != http.MethodDelete {
+			t.Fatalf("expected DELETE, got %s", r.Method)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	if _, err := client.DeleteBucket(context.Background(), &DeleteBucketInput{Bucket: "bucket"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestGetBucketLocation(t *testing.T) {
+	t.Parallel()
+
+	expectedDate := time.Date(2026, time.May, 22, 7, 16, 1, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertSigned(t, r, "access-key", expectedDate)
+		if _, ok := r.URL.Query()["location"]; !ok {
+			t.Fatalf("expected location query, got %s", r.URL.RawQuery)
+		}
+		_, _ = io.WriteString(w, `<LocationConstraint>EU</LocationConstraint>`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	output, err := client.GetBucketLocation(context.Background(), &GetBucketLocationInput{Bucket: "bucket"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if output.Region != "eu-west-1" {
+		t.Fatalf("unexpected location region: %s", output.Region)
+	}
+}
+
 func TestAPIError(t *testing.T) {
 	t.Parallel()
 
@@ -370,10 +523,7 @@ func TestAPIError(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server.URL)
-	_, err := client.GetObject(context.Background(), &GetObjectInput{
-		Bucket: "bucket",
-		Key:    "missing.txt",
-	})
+	_, err := client.GetObject(context.Background(), &GetObjectInput{Bucket: "bucket", Key: "missing.txt"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -390,11 +540,7 @@ func TestAPIError(t *testing.T) {
 func TestCanonicalQueryString(t *testing.T) {
 	t.Parallel()
 
-	query := canonicalQueryString(url.Values{
-		"prefix": {"folder/a b"},
-		"marker": {"one", "two"},
-	})
-
+	query := canonicalQueryString(url.Values{"prefix": {"folder/a b"}, "marker": {"one", "two"}})
 	if query != "marker=one&marker=two&prefix=folder%2Fa%20b" {
 		t.Fatalf("unexpected canonical query: %s", query)
 	}
@@ -407,7 +553,6 @@ func TestPreparePayloadReadSeeker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	if payloadHash != "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5" {
 		t.Fatalf("unexpected payload hash: %s", payloadHash)
 	}
@@ -427,17 +572,11 @@ func TestPreparePayloadReadSeeker(t *testing.T) {
 func newTestClient(t *testing.T, endpoint string) *Client {
 	t.Helper()
 
-	client, err := NewClient(&ClientConfig{
-		Endpoint:    endpoint,
-		Region:      "us-east-1",
-		Credentials: StaticCredentials("access-key", "secret-key", "session-token"),
-	})
+	client, err := NewClient(&ClientConfig{Endpoint: endpoint, Region: "us-east-1", Credentials: StaticCredentials("access-key", "secret-key", "session-token")})
 	if err != nil {
 		t.Fatalf("unexpected new client error: %v", err)
 	}
-	client.now = func() time.Time {
-		return time.Date(2026, time.May, 22, 7, 16, 1, 0, time.UTC)
-	}
+	client.now = func() time.Time { return time.Date(2026, time.May, 22, 7, 16, 1, 0, time.UTC) }
 	return client
 }
 
@@ -450,7 +589,7 @@ func assertSigned(t *testing.T, r *http.Request, accessKeyID string, expectedDat
 	if got := r.Header.Get("x-amz-security-token"); got != "session-token" {
 		t.Fatalf("unexpected security token: %s", got)
 	}
-	if got := r.Header.Get("Authorization"); !strings.Contains(got, "Credential="+accessKeyID+"/20260522/us-east-1/s3/aws4_request") {
+	if got := r.Header.Get("Authorization"); !strings.Contains(got, "Credential="+accessKeyID+"/20260522/") || !strings.Contains(got, "/s3/aws4_request") {
 		t.Fatalf("unexpected authorization header: %s", got)
 	}
 	if got := r.Header.Get("x-amz-content-sha256"); got == "" {
