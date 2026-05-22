@@ -99,3 +99,28 @@ log.Fatal(err)
 }
 log.Println("location:", locationOut.Region)
 ```
+
+## Integration tests with MinIO
+
+Start MinIO yourself (the Makefile target does not start it):
+
+```bash
+docker run --rm -p 9000:9000 -p 9001:9001 \
+  -e MINIO_ROOT_USER=minioadmin \
+  -e MINIO_ROOT_PASSWORD=minioadmin \
+  minio/minio server /data --console-address ":9001"
+```
+
+Run integration tests:
+
+```bash
+make test_s3_integration
+```
+
+You can override credentials/endpoint/region with these env vars:
+
+- `S3_INTEGRATION_ENDPOINT`
+- `S3_INTEGRATION_REGION`
+- `S3_INTEGRATION_ACCESS_KEY_ID`
+- `S3_INTEGRATION_SECRET_ACCESS_KEY`
+- `S3_INTEGRATION_SESSION_TOKEN` (optional)
