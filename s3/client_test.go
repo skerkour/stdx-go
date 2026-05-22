@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -188,7 +189,7 @@ func TestPutObject(t *testing.T) {
 		if got := r.Header.Get("x-amz-meta-environment"); got != "test" {
 			t.Fatalf("unexpected metadata header: %s", got)
 		}
-		if got := r.Header.Get("x-amz-content-sha256"); got != "239f59ed55e737c77147cf55ad0c1b030b6f6e7bd1043b61d6a97d6ba6917d90" {
+		if got := r.Header.Get("x-amz-content-sha256"); got != "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5" {
 			t.Fatalf("unexpected payload hash: %s", got)
 		}
 
@@ -369,7 +370,7 @@ func TestAPIError(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server.URL)
-	_, err := client.HeadObject(context.Background(), &HeadObjectInput{
+	_, err := client.GetObject(context.Background(), &GetObjectInput{
 		Bucket: "bucket",
 		Key:    "missing.txt",
 	})
@@ -389,7 +390,7 @@ func TestAPIError(t *testing.T) {
 func TestCanonicalQueryString(t *testing.T) {
 	t.Parallel()
 
-	query := canonicalQueryString(map[string][]string{
+	query := canonicalQueryString(url.Values{
 		"prefix": {"folder/a b"},
 		"marker": {"one", "two"},
 	})
@@ -407,7 +408,7 @@ func TestPreparePayloadReadSeeker(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if payloadHash != "239f59ed55e737c77147cf55ad0c1b030b6f6e7bd1043b61d6a97d6ba6917d90" {
+	if payloadHash != "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5" {
 		t.Fatalf("unexpected payload hash: %s", payloadHash)
 	}
 	if contentLength != int64(len("payload")) {

@@ -447,8 +447,9 @@ func (client *Client) CopyObject(ctx context.Context, input *CopyObjectInput) (*
 	}
 
 	var result struct {
-		ETag         string    `xml:"CopyObjectResult>ETag"`
-		LastModified time.Time `xml:"CopyObjectResult>LastModified"`
+		XMLName      xml.Name  `xml:"CopyObjectResult"`
+		ETag         string    `xml:"ETag"`
+		LastModified time.Time `xml:"LastModified"`
 	}
 	if err := xml.NewDecoder(res.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("s3: decoding copy object response: %w", err)
