@@ -41,6 +41,9 @@ func TestMinIOIntegration(t *testing.T) {
 	body := "hello from stdx-go integration test"
 
 	if _, err := client.CreateBucket(ctx, &CreateBucketInput{Bucket: bucket}); err != nil {
+		if strings.Contains(err.Error(), "connect: connection refused") {
+			t.Fatalf("create bucket: %v (is MinIO running at %s?)", err, endpoint)
+		}
 		t.Fatalf("create bucket: %v", err)
 	}
 	t.Cleanup(func() {
