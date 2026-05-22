@@ -267,8 +267,14 @@ func goTypeToTS(expr ast.Expr) (nullable bool, tsTypeName string) {
 		if ident, ok := t.Elt.(*ast.Ident); ok && ident.Name == "byte" {
 			return false, "string"
 		}
-		_, elemType := goTypeToTS(t.Elt)
-		return false, "Array<" + elemType + ">"
+		elemNullable, elemType := goTypeToTS(t.Elt)
+		if elemNullable {
+			elemType = elemType + " | null"
+		}
+		if strings.Contains(elemType, " | ") {
+			return false, "(" + elemType + ")[]"
+		}
+		return false, elemType + "[]"
 	case *ast.MapType:
 		_, keyType := goTypeToTS(t.Key)
 		_, valueType := goTypeToTS(t.Value)
@@ -325,4 +331,3 @@ func selectorToTS(t *ast.SelectorExpr) string {
 		return typ
 	}
 }
-
