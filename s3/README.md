@@ -119,8 +119,8 @@ make test_s3_integration
 
 You can override credentials/endpoint/region with these env vars:
 
-- `S3_INTEGRATION_ENDPOINT`
-- `S3_INTEGRATION_REGION`
-- `S3_INTEGRATION_ACCESS_KEY_ID`
-- `S3_INTEGRATION_SECRET_ACCESS_KEY`
-- `S3_INTEGRATION_SESSION_TOKEN` (optional)
+- `S3_ENDPOINT`
+- `S3_REGION`
+- `S3_ACCESS_KEY_ID`
+- `S3_SECRET_ACCESS_KEY`
+- `S3_SESSION_TOKEN` (optional)
