@@ -73,6 +73,63 @@ if err != nil {
 }
 ```
 
+## Multipart uploads
+
+```go
+ctx := context.Background()
+
+createOut, err := client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+    Bucket:      "my-bucket",
+    Key:         "large/archive.bin",
+    ContentType: "application/octet-stream",
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+part1Out, err := client.UploadPart(ctx, &s3.UploadPartInput{
+    Bucket:     "my-bucket",
+    Key:        "large/archive.bin",
+    UploadID:   createOut.UploadID,
+    PartNumber: 1,
+    Body:       strings.NewReader("part-one"),
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+part2Out, err := client.UploadPart(ctx, &s3.UploadPartInput{
+    Bucket:     "my-bucket",
+    Key:        "large/archive.bin",
+    UploadID:   createOut.UploadID,
+    PartNumber: 2,
+    Body:       strings.NewReader("part-two"),
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+_, err = client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+    Bucket:   "my-bucket",
+    Key:      "large/archive.bin",
+    UploadID: createOut.UploadID,
+    Parts: []s3.CompletedPart{
+        {PartNumber: 1, ETag: part1Out.ETag},
+        {PartNumber: 2, ETag: part2Out.ETag},
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+// On failure before completion:
+// _, _ = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+//     Bucket:   "my-bucket",
+//     Key:      "large/archive.bin",
+//     UploadID: createOut.UploadID,
+// })
+```
+
 ## Bucket operations
 
 ```go
