@@ -215,6 +215,162 @@ func TestPutObject(t *testing.T) {
 	}
 }
 
+func TestCreateMultipartUpload(t *testing.T) {
+	t.Parallel()
+
+	expectedDate := time.Date(2026, time.May, 22, 7, 16, 1, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertSigned(t, r, "access-key", expectedDate)
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		if _, ok := r.URL.Query()["uploads"]; !ok {
+			t.Fatalf("expected uploads query, got %s", r.URL.RawQuery)
+		}
+		if got := r.Header.Get("Content-Type"); got != "text/plain" {
+			t.Fatalf("unexpected content-type: %s", got)
+		}
+		if got := r.Header.Get("x-amz-meta-environment"); got != "test" {
+			t.Fatalf("unexpected metadata header: %s", got)
+		}
+
+		_, _ = io.WriteString(w, `<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>big-object.txt</Key><UploadId>upload-123</UploadId></InitiateMultipartUploadResult>`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	output, err := client.CreateMultipartUpload(context.Background(), &CreateMultipartUploadInput{
+		Bucket:      "bucket",
+		Key:         "big-object.txt",
+		ContentType: "text/plain",
+		Metadata:    map[string]string{"environment": "test"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if output.UploadID != "upload-123" || output.Bucket != "bucket" || output.Key != "big-object.txt" {
+		t.Fatalf("unexpected create multipart output: %#v", output)
+	}
+}
+
+func TestUploadPart(t *testing.T) {
+	t.Parallel()
+
+	expectedDate := time.Date(2026, time.May, 22, 7, 16, 1, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertSigned(t, r, "access-key", expectedDate)
+		if r.Method != http.MethodPut {
+			t.Fatalf("expected PUT, got %s", r.Method)
+		}
+		if got := r.URL.Query().Get("partNumber"); got != "1" {
+			t.Fatalf("unexpected part number: %s", got)
+		}
+		if got := r.URL.Query().Get("uploadId"); got != "upload-123" {
+			t.Fatalf("unexpected upload id: %s", got)
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("unexpected read error: %v", err)
+		}
+		if string(body) != "part-1" {
+			t.Fatalf("unexpected body: %q", string(body))
+		}
+
+		w.Header().Set("ETag", "\"part-etag-1\"")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	output, err := client.UploadPart(context.Background(), &UploadPartInput{
+		Bucket:     "bucket",
+		Key:        "big-object.txt",
+		UploadID:   "upload-123",
+		PartNumber: 1,
+		Body:       strings.NewReader("part-1"),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if output.ETag != "\"part-etag-1\"" {
+		t.Fatalf("unexpected upload part output: %#v", output)
+	}
+}
+
+func TestCompleteMultipartUpload(t *testing.T) {
+	t.Parallel()
+
+	expectedDate := time.Date(2026, time.May, 22, 7, 16, 1, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertSigned(t, r, "access-key", expectedDate)
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		if got := r.URL.Query().Get("uploadId"); got != "upload-123" {
+			t.Fatalf("unexpected upload id: %s", got)
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("unexpected read error: %v", err)
+		}
+		request := string(body)
+		if !strings.Contains(request, "<PartNumber>1</PartNumber>") || !strings.Contains(request, "<PartNumber>2</PartNumber>") {
+			t.Fatalf("unexpected complete multipart body: %s", request)
+		}
+
+		_, _ = io.WriteString(w, `<CompleteMultipartUploadResult><Location>http://127.0.0.1:9000/bucket/big-object.txt</Location><Bucket>bucket</Bucket><Key>big-object.txt</Key><ETag>"final-etag"</ETag></CompleteMultipartUploadResult>`)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	output, err := client.CompleteMultipartUpload(context.Background(), &CompleteMultipartUploadInput{
+		Bucket:   "bucket",
+		Key:      "big-object.txt",
+		UploadID: "upload-123",
+		Parts: []CompletedPart{
+			{PartNumber: 1, ETag: "\"part-etag-1\""},
+			{PartNumber: 2, ETag: "\"part-etag-2\""},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if output.ETag != "\"final-etag\"" || output.Bucket != "bucket" || output.Key != "big-object.txt" {
+		t.Fatalf("unexpected complete multipart output: %#v", output)
+	}
+}
+
+func TestAbortMultipartUpload(t *testing.T) {
+	t.Parallel()
+
+	expectedDate := time.Date(2026, time.May, 22, 7, 16, 1, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertSigned(t, r, "access-key", expectedDate)
+		if r.Method != http.MethodDelete {
+			t.Fatalf("expected DELETE, got %s", r.Method)
+		}
+		if got := r.URL.Query().Get("uploadId"); got != "upload-123" {
+			t.Fatalf("unexpected upload id: %s", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	if _, err := client.AbortMultipartUpload(context.Background(), &AbortMultipartUploadInput{
+		Bucket:   "bucket",
+		Key:      "big-object.txt",
+		UploadID: "upload-123",
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestDeleteObject(t *testing.T) {
 	t.Parallel()
 

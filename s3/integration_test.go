@@ -38,6 +38,7 @@ func TestMinIOIntegration(t *testing.T) {
 
 	bucket := fmt.Sprintf("stdx-go-integration-%d", time.Now().UnixNano())
 	key := "integration/object.txt"
+	multipartKey := "integration/multipart-object.txt"
 	body := "hello from stdx-go integration test"
 
 	if _, err := client.CreateBucket(ctx, &CreateBucketInput{Bucket: bucket}); err != nil {
@@ -51,6 +52,7 @@ func TestMinIOIntegration(t *testing.T) {
 		defer cleanupCancel()
 
 		_, _ = client.DeleteObject(cleanupCtx, &DeleteObjectInput{Bucket: bucket, Key: key})
+		_, _ = client.DeleteObject(cleanupCtx, &DeleteObjectInput{Bucket: bucket, Key: multipartKey})
 		_, _ = client.DeleteBucket(cleanupCtx, &DeleteBucketInput{Bucket: bucket})
 	})
 
@@ -111,6 +113,68 @@ func TestMinIOIntegration(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected object %q in list output: %#v", key, listOut.Contents)
+	}
+
+	multipartUploadOut, err := client.CreateMultipartUpload(ctx, &CreateMultipartUploadInput{
+		Bucket:      bucket,
+		Key:         multipartKey,
+		ContentType: "text/plain",
+	})
+	if err != nil {
+		t.Fatalf("create multipart upload: %v", err)
+	}
+
+	part1Body := "hello from "
+	part2Body := "multipart upload integration test"
+	part1Out, err := client.UploadPart(ctx, &UploadPartInput{
+		Bucket:     bucket,
+		Key:        multipartKey,
+		UploadID:   multipartUploadOut.UploadID,
+		PartNumber: 1,
+		Body:       strings.NewReader(part1Body),
+	})
+	if err != nil {
+		t.Fatalf("upload part 1: %v", err)
+	}
+	part2Out, err := client.UploadPart(ctx, &UploadPartInput{
+		Bucket:     bucket,
+		Key:        multipartKey,
+		UploadID:   multipartUploadOut.UploadID,
+		PartNumber: 2,
+		Body:       strings.NewReader(part2Body),
+	})
+	if err != nil {
+		t.Fatalf("upload part 2: %v", err)
+	}
+
+	if _, err := client.CompleteMultipartUpload(ctx, &CompleteMultipartUploadInput{
+		Bucket:   bucket,
+		Key:      multipartKey,
+		UploadID: multipartUploadOut.UploadID,
+		Parts: []CompletedPart{
+			{PartNumber: 1, ETag: part1Out.ETag},
+			{PartNumber: 2, ETag: part2Out.ETag},
+		},
+	}); err != nil {
+		t.Fatalf("complete multipart upload: %v", err)
+	}
+
+	multipartGetOut, err := client.GetObject(ctx, &GetObjectInput{Bucket: bucket, Key: multipartKey})
+	if err != nil {
+		t.Fatalf("get multipart object: %v", err)
+	}
+	defer multipartGetOut.Body.Close()
+
+	multipartReadBody, err := io.ReadAll(multipartGetOut.Body)
+	if err != nil {
+		t.Fatalf("read multipart object body: %v", err)
+	}
+	if string(multipartReadBody) != part1Body+part2Body {
+		t.Fatalf("unexpected multipart object body: %q", string(multipartReadBody))
+	}
+
+	if _, err := client.DeleteObject(ctx, &DeleteObjectInput{Bucket: bucket, Key: multipartKey}); err != nil {
+		t.Fatalf("delete multipart object: %v", err)
 	}
 
 	if _, err := client.GetBucketLocation(ctx, &GetBucketLocationInput{Bucket: bucket}); err != nil {

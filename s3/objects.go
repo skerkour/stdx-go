@@ -64,6 +64,61 @@ type PutObjectOutput struct {
 	VersionID string
 }
 
+type CreateMultipartUploadInput struct {
+	Bucket      string
+	Key         string
+	ContentType string
+	Metadata    map[string]string
+}
+
+type CreateMultipartUploadOutput struct {
+	Bucket   string
+	Key      string
+	UploadID string
+}
+
+type UploadPartInput struct {
+	Bucket        string
+	Key           string
+	UploadID      string
+	PartNumber    int
+	Body          io.Reader
+	ContentLength int64
+	ContentMD5    string
+	ContentSHA256 string
+}
+
+type UploadPartOutput struct {
+	ETag string
+}
+
+type CompleteMultipartUploadInput struct {
+	Bucket   string
+	Key      string
+	UploadID string
+	Parts    []CompletedPart
+}
+
+type CompletedPart struct {
+	PartNumber int    `xml:"PartNumber"`
+	ETag       string `xml:"ETag"`
+}
+
+type CompleteMultipartUploadOutput struct {
+	Location string
+	Bucket   string
+	Key      string
+	ETag     string
+}
+
+type AbortMultipartUploadInput struct {
+	Bucket   string
+	Key      string
+	UploadID string
+}
+
+type AbortMultipartUploadOutput struct{}
+
 type DeleteObjectInput struct {
 	Bucket    string
 	Key       string
@@ -250,6 +305,169 @@ func (client *Client) PutObject(ctx context.Context, input *PutObjectInput) (*Pu
 		ETag:      res.Header.Get("ETag"),
 		VersionID: res.Header.Get("x-amz-version-id"),
 	}, nil
+}
+
+func (client *Client) CreateMultipartUpload(ctx context.Context, input *CreateMultipartUploadInput) (*CreateMultipartUploadOutput, error) {
+	if err := validateBucketAndKey(inputBucketKey(input)); err != nil {
+		return nil, err
+	}
+
+	headers := http.Header{}
+	if input.ContentType != "" {
+		headers.Set("Content-Type", input.ContentType)
+	}
+	for key, value := range input.Metadata {
+		headers.Set(metadataHeaderKey+strings.ToLower(key), value)
+	}
+
+	query := url.Values{"uploads": {""}}
+	res, err := client.do(ctx, http.MethodPost, input.Bucket, input.Key, query, headers, nil, 0, emptyPayloadHash)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode >= http.StatusMultipleChoices {
+		return nil, decodeAPIError(res)
+	}
+
+	var output struct {
+		Bucket   string `xml:"Bucket"`
+		Key      string `xml:"Key"`
+		UploadID string `xml:"UploadId"`
+	}
+	if err := xml.NewDecoder(res.Body).Decode(&output); err != nil {
+		return nil, fmt.Errorf("s3: decoding create multipart upload response: %w", err)
+	}
+
+	return &CreateMultipartUploadOutput{
+		Bucket:   output.Bucket,
+		Key:      output.Key,
+		UploadID: output.UploadID,
+	}, nil
+}
+
+func (client *Client) UploadPart(ctx context.Context, input *UploadPartInput) (*UploadPartOutput, error) {
+	if err := validateBucketAndKey(inputBucketKey(input)); err != nil {
+		return nil, err
+	}
+	if input.UploadID == "" {
+		return nil, errors.New("s3: upload id is required")
+	}
+	if input.PartNumber <= 0 {
+		return nil, errors.New("s3: part number must be greater than zero")
+	}
+	if input.Body == nil {
+		return nil, errors.New("s3: upload part body is required")
+	}
+
+	body, payloadHash, contentLength, err := preparePayload(input.Body, input.ContentSHA256, input.ContentLength)
+	if err != nil {
+		return nil, err
+	}
+
+	headers := http.Header{}
+	if input.ContentMD5 != "" {
+		headers.Set("Content-MD5", input.ContentMD5)
+	}
+	query := url.Values{
+		"partNumber": {strconv.Itoa(input.PartNumber)},
+		"uploadId":   {input.UploadID},
+	}
+	res, err := client.do(ctx, http.MethodPut, input.Bucket, input.Key, query, headers, body, contentLength, payloadHash)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode >= http.StatusMultipleChoices {
+		return nil, decodeAPIError(res)
+	}
+
+	return &UploadPartOutput{ETag: res.Header.Get("ETag")}, nil
+}
+
+func (client *Client) CompleteMultipartUpload(ctx context.Context, input *CompleteMultipartUploadInput) (*CompleteMultipartUploadOutput, error) {
+	if err := validateBucketAndKey(inputBucketKey(input)); err != nil {
+		return nil, err
+	}
+	if input.UploadID == "" {
+		return nil, errors.New("s3: upload id is required")
+	}
+	if len(input.Parts) == 0 {
+		return nil, errors.New("s3: at least one completed part is required")
+	}
+	for _, part := range input.Parts {
+		if part.PartNumber <= 0 {
+			return nil, errors.New("s3: completed part number must be greater than zero")
+		}
+		if strings.TrimSpace(part.ETag) == "" {
+			return nil, errors.New("s3: completed part etag is required")
+		}
+	}
+
+	bodyPayload, err := xml.Marshal(struct {
+		XMLName xml.Name        `xml:"CompleteMultipartUpload"`
+		Parts   []CompletedPart `xml:"Part"`
+	}{
+		Parts: input.Parts,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("s3: encoding complete multipart upload request: %w", err)
+	}
+
+	query := url.Values{"uploadId": {input.UploadID}}
+	headers := http.Header{}
+	headers.Set("Content-Type", "application/xml")
+	payloadHash := hashSHA256Hex(bodyPayload)
+	res, err := client.do(ctx, http.MethodPost, input.Bucket, input.Key, query, headers, bytes.NewReader(bodyPayload), int64(len(bodyPayload)), payloadHash)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode >= http.StatusMultipleChoices {
+		return nil, decodeAPIError(res)
+	}
+
+	var output struct {
+		Location string `xml:"Location"`
+		Bucket   string `xml:"Bucket"`
+		Key      string `xml:"Key"`
+		ETag     string `xml:"ETag"`
+	}
+	if err := xml.NewDecoder(res.Body).Decode(&output); err != nil {
+		return nil, fmt.Errorf("s3: decoding complete multipart upload response: %w", err)
+	}
+
+	return &CompleteMultipartUploadOutput{
+		Location: output.Location,
+		Bucket:   output.Bucket,
+		Key:      output.Key,
+		ETag:     output.ETag,
+	}, nil
+}
+
+func (client *Client) AbortMultipartUpload(ctx context.Context, input *AbortMultipartUploadInput) (*AbortMultipartUploadOutput, error) {
+	if err := validateBucketAndKey(inputBucketKey(input)); err != nil {
+		return nil, err
+	}
+	if input.UploadID == "" {
+		return nil, errors.New("s3: upload id is required")
+	}
+
+	query := url.Values{"uploadId": {input.UploadID}}
+	res, err := client.do(ctx, http.MethodDelete, input.Bucket, input.Key, query, nil, nil, 0, emptyPayloadHash)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode >= http.StatusMultipleChoices {
+		return nil, decodeAPIError(res)
+	}
+
+	return &AbortMultipartUploadOutput{}, nil
 }
 
 func (client *Client) DeleteObject(ctx context.Context, input *DeleteObjectInput) (*DeleteObjectOutput, error) {
@@ -485,6 +703,14 @@ func inputBucketKey(input interface{}) (string, string) {
 	case *HeadObjectInput:
 		return value.Bucket, value.Key
 	case *PutObjectInput:
+		return value.Bucket, value.Key
+	case *CreateMultipartUploadInput:
+		return value.Bucket, value.Key
+	case *UploadPartInput:
+		return value.Bucket, value.Key
+	case *CompleteMultipartUploadInput:
+		return value.Bucket, value.Key
+	case *AbortMultipartUploadInput:
 		return value.Bucket, value.Key
 	case *DeleteObjectInput:
 		return value.Bucket, value.Key
