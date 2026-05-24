@@ -6,7 +6,7 @@ require (
 	github.com/alecthomas/chroma/v2 v2.24.1
 	github.com/creack/pty v1.1.24
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/klauspost/cpuid/v2 v2.3.0
@@ -15,12 +15,12 @@ require (
 	github.com/tetratelabs/wazero v1.11.0
 	github.com/yuin/goldmark v1.8.2
 	github.com/zeebo/blake3 v0.2.4
-	golang.org/x/crypto v0.51.0
-	golang.org/x/image v0.40.0
+	golang.org/x/crypto v0.52.0
+	golang.org/x/image v0.41.0
 	golang.org/x/mod v0.36.0
-	golang.org/x/net v0.54.0
+	golang.org/x/net v0.55.0
 	golang.org/x/sync v0.20.0
-	golang.org/x/sys v0.44.0
+	golang.org/x/sys v0.45.0
 	golang.org/x/term v0.43.0
 	golang.org/x/text v0.37.0
 )
