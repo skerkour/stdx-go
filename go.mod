@@ -13,7 +13,7 @@ require (
 	github.com/mmcloughlin/avo v0.6.0
 	github.com/rogpeppe/go-internal v1.15.0
 	github.com/tetratelabs/wazero v1.12.0
-	github.com/yuin/goldmark v1.8.2
+	github.com/yuin/goldmark v1.8.4
 	github.com/zeebo/blake3 v0.2.4
 	golang.org/x/crypto v0.54.0
 	golang.org/x/image v0.44.0
@@ -26,7 +26,7 @@ require (
 )
 
 require (
-	github.com/dlclark/regexp2/v2 v2.2.2 // indirect
+	github.com/dlclark/regexp2/v2 v2.5.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
