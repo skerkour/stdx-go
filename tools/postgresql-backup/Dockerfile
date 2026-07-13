@@ -43,7 +43,7 @@ RUN update-ca-certificates
 RUN echo "UTC" > /etc/timezone
 
 # Copy our builds
-COPY --from=builder_go /stdx-go/tools/postgresql-backup/dist/postgresql-backup /usr/local/bin/postgresql-backup
+COPY --from=builder_go /stdx-go/dist/postgresql-backup /usr/local/bin/postgresql-backup
 
 
 # Use an unprivileged user.
