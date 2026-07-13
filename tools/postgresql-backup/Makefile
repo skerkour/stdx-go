@@ -10,4 +10,4 @@ build:
 
 .PHONY: docker_build
 docker_build:
-	docker build -t $(DOCKER_IMAGE):latest -f Dockerfile .
+	docker build -t $(DOCKER_IMAGE):latest -f Dockerfile ../..

@@ -1,8 +1,7 @@
 ####################################################################################################
-## Build pgbakcup and pgbakcup-server
+## Builder image
 ####################################################################################################
-FROM golang:latest AS go
-FROM debian:13 AS builder_go
+FROM golang:latest AS builder_go
 
 ENV TZ="UTC"
 # ENV LC_ALL="en_US.UTF-8"
@@ -16,53 +15,19 @@ RUN apt update && apt upgrade -y && \
     apt install -y ca-certificates git make tzdata binutils mailcap
 RUN update-ca-certificates
 
-# setup go
-COPY --from=go /usr/local/go /usr/local/go
-ENV GOROOT="/usr/local/go"
-ENV PATH="$PATH:$GOROOT/bin"
-ENV GOPROXY=direct
-ENV GOTOOLCHAIN="local"
-RUN go telemetry off
 
-
-WORKDIR /pgbakcup
+WORKDIR /stdx-go
 COPY . ./
 
-RUN make build
-
-####################################################################################################
-## This container is used to get the correct files to scratch
-####################################################################################################
-FROM --platform=$BUILDPLATFORM debian:13-slim AS builder_files
-
-# appuser
-ENV USER=pgbakcup
-ENV UID=10001
-
-# mailcap is used for content type (MIME type) detection
-# tzdata is used for timezones info
-RUN apt update && apt upgrade -y && \
-    apt install -y mailcap ca-certificates adduser wget tzdata
-RUN update-ca-certificates
-
-ENV TZ="UTC"
-RUN echo "${TZ}" > /etc/timezone
-
-RUN adduser \
-    --disabled-password \
-    --gecos "" \
-    --home "/nonexistent" \
-    --shell "/sbin/nologin" \
-    --no-create-home \
-    --uid "${UID}" \
-    "${USER}"
+RUN mkdir -p dist
+RUN GOAMD64=v3 GOOS=linux CGO_ENABLED=0 go build -o dist/postgresql-backup -tags timetzdata \
+	-trimpath -a -ldflags "-B none -extldflags -static -w -s" \
+	./tools/postgresql-backup/
 
 ####################################################################################################
 ## Final image
 ####################################################################################################
 
-# See https://chemidy.medium.com/create-the-smallest-and-secured-golang-docker-image-based-on-scratch-4752223b7324
-# for more information about how to create Go containers FROM scratch
 FROM alpine:latest
 
 ENV TZ="UTC"
@@ -70,40 +35,28 @@ ENV LC_ALL="en_US.UTF-8"
 ENV LANG="en_US.UTF-8"
 ENV LANGUAGE="en_US:en"
 
-# /etc/nsswitch.conf may be used by some DNS resolvers
-# /etc/mime.types may be used to detect the MIME type of files
-COPY --from=builder_files --chmod=444 \
-    /etc/passwd \
-    /etc/group \
-    /etc/timezone \
-    /etc/
-
-# COPY --from=builder_files --chmod=444 \
-#     /etc/passwd \
-#     /etc/group \
-#     /etc/nsswitch.conf \
-#     /etc/mime.types \
-#     /etc/timezone \
-#     /etc/
-
-# COPY --from=builder_files  --chmod=444 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-# RUN chmod 0755 /etc/ssl && chmod 0755 /etc/ssl/certs
-# # COPY --from=builder_files --chmod=755 /etc/ssl /etc/ssl
-# COPY --from=builder_files --chmod=444 /usr/share/zoneinfo /usr/share/zoneinfo
-
-# Copy our builds
-COPY --from=builder_go /pgbakcup/dist/postgresql-backup /usr/local/bin/postgresql-backup
-
-RUN apk add --no-cache ca-certificates postgresql17-client mailcap tzdata
+RUN apk update && \
+    apk upgrade --no-cache && \
+    apk add --no-cache ca-certificates postgresql17-client mailcap tzdata
 RUN update-ca-certificates
 
-# Use an unprivileged user.
-USER pgbakcup:pgbakcup
+RUN echo "UTC" > /etc/timezone
 
-# the scratch image doesn't have a /tmp folder so we need to create it
-WORKDIR /tmp
+# Copy our builds
+COPY --from=builder_go /stdx-go/tools/postgresql-backup/dist/postgresql-backup /usr/local/bin/postgresql-backup
+
+
+# Use an unprivileged user.
+RUN adduser \
+    --disabled-password \
+    --gecos "" \
+    --shell "/bin/nonexisting" \
+    --no-create-home \
+    --uid 1001 \
+    "pgbakcup"
+USER pgbakcup:pgbakcup
 
 # Final working directory
 WORKDIR /app
 
-ENTRYPOINT ["/usr/local/bin/postgresql-backup"]
+ENTRYPOINT ["/usr/local/bin/postgresql-backup", "-config", "config.yml"]
