@@ -10,9 +10,6 @@ import (
 // see also ttps://restcountries.eu/rest/v2/all
 // https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2
 
-//go:embed countries.json
-var Bytes []byte
-
 const (
 	Unknown     = "Unknown"
 	CodeUnknown = "XX"
@@ -67,6 +64,7 @@ var allCountries = map[string]string{
 	"BE": "Belgium",
 	"BZ": "Belize",
 	"BJ": "Benin",
+	"BL": "Saint Barthélemy",
 	"BM": "Bermuda",
 	"BT": "Bhutan",
 	"BO": "Bolivia",
@@ -175,7 +173,7 @@ var allCountries = map[string]string{
 	"LT": "Lithuania",
 	"LU": "Luxembourg",
 	"MO": "Macao",
-	"MK": "Macedonia, The Former Yugoslav Republic of",
+	"MK": "North Macedonia",
 	"MG": "Madagascar",
 	"MW": "Malawi",
 	"MY": "Malaysia",
@@ -256,7 +254,8 @@ var allCountries = map[string]string{
 	"SD": "Sudan",
 	"SR": "Suriname",
 	"SJ": "Svalbard and Jan Mayen",
-	"SZ": "Swaziland",
+	"SX": "Sint Maarten (Dutch part)",
+	"SZ": "Eswatini",
 	"SE": "Sweden",
 	"CH": "Switzerland",
 	"SY": "Syrian Arab Republic",
@@ -292,6 +291,4 @@ var allCountries = map[string]string{
 	"YE": "Yemen",
 	"ZM": "Zambia",
 	"ZW": "Zimbabwe",
-
-	"XX": "Unknown",
 }

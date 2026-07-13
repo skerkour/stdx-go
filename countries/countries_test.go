@@ -7,9 +7,8 @@ import (
 )
 
 func TestGetMap(t *testing.T) {
-	// There are officialy 249 assigned country codes (https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2)
-	// so with our user-defined code XX (for unknown) the total is 250
-	expectedNumberOfCountries := 250
+	// There are officialy 251 assigned country codes (matching ISO 3166-1 alpha-2 data)
+	expectedNumberOfCountries := 251
 
 	countries := countries.All()
 
