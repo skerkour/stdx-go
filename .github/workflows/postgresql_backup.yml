@@ -27,9 +27,8 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Docker build image
-        working-directory: tools/postgresql-backup
         run: |
-          make docker_build
+          cd tools/postgresql-backup && make docker_build
           docker image tag ${{ env.DOCKER_IMAGE }}:latest ${{ env.DOCKER_IMAGE }}:latest-${{ matrix.arch }}
 
       - name: Docker images info
