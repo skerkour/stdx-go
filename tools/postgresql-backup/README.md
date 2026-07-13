@@ -30,6 +30,12 @@ KEY=... postgresql-backup -decrypt backup.sql.gz.enc
 psql "$DATABASE_URL" < restore.sql
 ```
 
+## Docker
+
+```bash
+$ docker run -d -v `pwd`/config.yml:/app/config.yml:ro ghcr.io/skerkour/postgresql-backup
+```
+
 ## Config
 
 ```yaml
