@@ -1,0 +1,63 @@
+name: postgresql-backup
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  packages: write
+  contents: read
+
+
+env:
+  DOCKER_IMAGE: ghcr.io/skerkour/postgresql-backup
+
+jobs:
+  docker_build_native:
+    runs-on:  ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - amd64
+          - arm64
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Docker build image
+        working-directory: tools/postgresql-backup
+        run: |
+          make docker_build
+          docker image tag ${{ env.DOCKER_IMAGE }}:latest ${{ env.DOCKER_IMAGE }}:latest-${{ matrix.arch }}
+
+      - name: Docker images info
+        run: |
+          docker images
+
+      - name: Login to container registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u $ --password-stdin
+
+      - name: Docker push image
+        run: |
+          docker push ${{ env.DOCKER_IMAGE }}:latest-${{ matrix.arch }}
+
+
+  docker_release_manifest:
+    runs-on: ubuntu-latest
+    needs:
+      - docker_build
+    steps:
+      - name: Login to container registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u $ --password-stdin
+
+
+      - name: Push Docker manifest
+        run: |
+          docker manifest create ${{ env.DOCKER_IMAGE }}:latest \
+            --amend ${{ env.DOCKER_IMAGE }}:latest-amd64 \
+            --amend ${{ env.DOCKER_IMAGE }}:latest-arm64
+          docker manifest push ${{ env.DOCKER_IMAGE }}:latest

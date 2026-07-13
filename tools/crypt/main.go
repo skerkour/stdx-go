@@ -68,6 +68,7 @@ func main() {
 	}
 
 	err = processFile(password, fileIn, fileOut, fn)
+	zeroize(password)
 	if err != nil {
 		log.Fatal(err)
 	}

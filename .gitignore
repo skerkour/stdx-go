@@ -46,3 +46,5 @@ node_modules/
 .env*
 *.local
 _dev
+tools/**/*.yml
+tools/**/dist/

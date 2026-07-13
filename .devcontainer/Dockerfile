@@ -1,5 +1,5 @@
+FROM node:slim AS node
 FROM golang:1.26 AS go
-
 FROM debian:13
 
 ENV TZ="UTC"
@@ -17,6 +17,18 @@ RUN apt-get install -y --no-install-recommends \
     python3 python3-pip pipx \
     # useful data. mailcap for mimetypes. tzdata for timezones.
     mailcap tzdata libpcre2-dev
+
+
+# setup node
+COPY --from=node /usr/local/bin/node /usr/local/bin/
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+  && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+RUN /usr/local/bin/npm i -g npm@latest
+RUN npm config set ignore-scripts true
+RUN npm config set min-release-age 7
+
 
 # Setup dev user
 ARG USERNAME=dev
@@ -36,6 +48,11 @@ USER $USERNAME
 
 COPY --chown=$USERNAME bashrc /home/$USERNAME/.bashrc
 COPY --chown=$USERNAME vimrc /home/$USERNAME/.vimrc
+
+# setup node (again, as a normal user this time)
+RUN npm config set ignore-scripts true
+RUN npm config set prefix '~/.npm/'
+RUN npm config set min-release-age 7
 
 # setup go
 RUN mkdir -p /home/$USERNAME/.local/gopath
