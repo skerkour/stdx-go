@@ -235,22 +235,22 @@ func Sign(keyAny any, header *Header, claims any) (string, error) {
 	buf = base64.RawURLEncoding.AppendEncode(buf, claimsJSON)
 
 	var signature []byte
-	switch k := keyAny.(type) {
+	switch key := keyAny.(type) {
 	case ed25519.PrivateKey:
 		if header.Alg != EdDSA {
 			return "", ErrInvalidAlgorithm
 		}
-		signature = ed25519.Sign(k, buf)
+		signature = ed25519.Sign(key, buf)
 
 	case *ecdsa.PrivateKey:
-		_, expectedAlg, _, err := curveInfo(k.Curve)
+		_, expectedAlg, _, err := curveInfo(key.Curve)
 		if err != nil {
 			return "", err
 		}
 		if header.Alg != expectedAlg {
 			return "", ErrInvalidAlgorithm
 		}
-		signature, err = ecdsaSign(k, buf, header.Alg)
+		signature, err = ecdsaSign(key, buf, header.Alg)
 		if err != nil {
 			return "", err
 		}
@@ -259,7 +259,7 @@ func Sign(keyAny any, header *Header, claims any) (string, error) {
 		if !header.Alg.isRSA() {
 			return "", ErrInvalidAlgorithm
 		}
-		signature, err = rsaSign(k, buf, header.Alg)
+		signature, err = rsaSign(key, buf, header.Alg)
 		if err != nil {
 			return "", err
 		}
@@ -268,12 +268,12 @@ func Sign(keyAny any, header *Header, claims any) (string, error) {
 		if !header.Alg.isHMAC() {
 			return "", ErrInvalidAlgorithm
 		}
-		if len(k) < 32 {
+		if len(key) < 32 {
 			return "", ErrKeyIsTooShort
 		}
-		sig, hmErr := hmacSign(buf, k, header.Alg)
-		if hmErr != nil {
-			return "", hmErr
+		sig, err := hmacSign(buf, key, header.Alg)
+		if err != nil {
+			return "", err
 		}
 		signature = sig
 
