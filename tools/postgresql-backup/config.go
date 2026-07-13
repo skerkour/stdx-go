@@ -10,6 +10,7 @@ type S3Config struct {
 	Bucket          string `yaml:"bucket"`
 	AccessKeyID     string `yaml:"access_key_id"`
 	SecretAccessKey string `yaml:"secret_access_key"`
+	Region          string `yaml:"region"`
 }
 
 type DatabaseConfig struct {

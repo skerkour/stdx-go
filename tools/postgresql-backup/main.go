@@ -142,6 +142,9 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.S3.SecretAccessKey == "" {
 		return nil, errors.New("s3.secret_access_key is required")
 	}
+	if cfg.S3.Region == "" {
+		cfg.S3.Region = "auto"
+	}
 
 	for _, db := range cfg.Databases {
 		if db.URL == "" {

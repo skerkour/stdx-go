@@ -16,15 +16,16 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-func createS3Client(cfg S3Config) (*minio.Client, error) {
-	u, err := url.Parse(cfg.Endpoint)
+func createS3Client(s3Config S3Config) (*minio.Client, error) {
+	u, err := url.Parse(s3Config.Endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid s3 endpoint: %w", err)
 	}
 
 	client, err := minio.New(u.Host, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.AccessKeyID, cfg.SecretAccessKey, ""),
+		Creds:  credentials.NewStaticV4(s3Config.AccessKeyID, s3Config.SecretAccessKey, ""),
 		Secure: u.Scheme == "https",
+		Region: s3Config.Region,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating s3 client: %w", err)
@@ -33,7 +34,7 @@ func createS3Client(cfg S3Config) (*minio.Client, error) {
 	return client, nil
 }
 
-func createBackup(ctx context.Context, s3Client *minio.Client, s3Cfg S3Config, db DatabaseConfig) error {
+func createBackup(ctx context.Context, s3Client *minio.Client, s3Config S3Config, db DatabaseConfig) error {
 	slog.Info("starting backup", "folder", db.Folder)
 
 	compressed, err := runPgDumpCompressed(db.URL)
@@ -49,7 +50,7 @@ func createBackup(ctx context.Context, s3Client *minio.Client, s3Cfg S3Config, d
 	now := time.Now().UTC()
 	key := fmt.Sprintf("%s/%04d/%02d/%s.sql.gz.enc", db.Folder, now.Year(), now.Month(), now.Format(time.RFC3339))
 
-	_, err = s3Client.PutObject(ctx, s3Cfg.Bucket, key,
+	_, err = s3Client.PutObject(ctx, s3Config.Bucket, key,
 		bytes.NewReader(encrypted), int64(len(encrypted)),
 		minio.PutObjectOptions{ContentType: "application/octet-stream"})
 	if err != nil {
