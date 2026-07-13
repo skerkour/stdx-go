@@ -37,7 +37,7 @@ func TestSignAndVerify_Ed25519(t *testing.T) {
 	}
 
 	opts := VerifyOptions{Exp: true, Nbf: false, AllowedTimeDrift: time.Minute}
-	result, err := ParseAndVerify[map[string]any](pub, &parsedHeader, token, &opts)
+	result, err := ParseAndVerify[map[string]any](pub, parsedHeader, token, &opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,12 +58,12 @@ func TestSignAndVerify_Ed25519PrivateKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	headerParsed, err := ParseHeader(token)
+	parsedHeader, err := ParseHeader(token)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = ParseAndVerify[map[string]any](priv, &headerParsed, token, nil)
+	_, err = ParseAndVerify[map[string]any](priv, parsedHeader, token, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestSignAndVerify_ECDSAP256(t *testing.T) {
 		t.Fatalf("expected ES256, got %s", parsedHeader.Alg)
 	}
 
-	result, err := ParseAndVerify[map[string]any](pub, &parsedHeader, token, nil)
+	result, err := ParseAndVerify[map[string]any](pub, parsedHeader, token, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestSignAndVerify_ECDSAP384(t *testing.T) {
 		t.Fatalf("expected ES384, got %s", parsedHeader.Alg)
 	}
 
-	_, err = ParseAndVerify[map[string]any](pub, &parsedHeader, token, nil)
+	_, err = ParseAndVerify[map[string]any](pub, parsedHeader, token, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestSignAndVerify_ECDSAP521(t *testing.T) {
 		t.Fatalf("expected ES512, got %s", parsedHeader.Alg)
 	}
 
-	_, err = ParseAndVerify[map[string]any](pub, &parsedHeader, token, nil)
+	_, err = ParseAndVerify[map[string]any](pub, parsedHeader, token, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestSignAndVerify_HMAC(t *testing.T) {
 			t.Fatalf("ParseHeader(%s): %v", tt.alg, err)
 		}
 
-		_, err = ParseAndVerify[map[string]any]([]byte(tt.key), &parsedHeader, token, nil)
+		_, err = ParseAndVerify[map[string]any]([]byte(tt.key), parsedHeader, token, nil)
 		if err != nil {
 			t.Fatalf("ParseAndVerify(%s): %v", tt.alg, err)
 		}
@@ -206,7 +206,7 @@ func TestSignAndVerify_RSAPublicKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := ParseAndVerify[map[string]any](pub, &parsedHeader, token, nil)
+	result, err := ParseAndVerify[map[string]any](pub, parsedHeader, token, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestSignAndVerify_WithRegisteredClaims(t *testing.T) {
 		AllowedTimeDrift: time.Minute,
 	}
 
-	result, err := ParseAndVerify[RegisteredClaims](priv, &parsedHeader, token, &opts)
+	result, err := ParseAndVerify[RegisteredClaims](priv, parsedHeader, token, &opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestSignAndVerify_ExpiredToken(t *testing.T) {
 	}
 
 	opts := VerifyOptions{Exp: true}
-	_, err = ParseAndVerify[map[string]any](priv, &parsedHeader, token, &opts)
+	_, err = ParseAndVerify[map[string]any](priv, parsedHeader, token, &opts)
 	if err != ErrTokenExpired {
 		t.Fatalf("expected ErrTokenExpired, got %v", err)
 	}
@@ -305,7 +305,7 @@ func TestSignAndVerify_NotYetValid(t *testing.T) {
 	}
 
 	opts := VerifyOptions{Nbf: true}
-	_, err = ParseAndVerify[map[string]any](priv, &parsedHeader, token, &opts)
+	_, err = ParseAndVerify[map[string]any](priv, parsedHeader, token, &opts)
 	if err != ErrTokenNotYetValid {
 		t.Fatalf("expected ErrTokenNotYetValid, got %v", err)
 	}
@@ -331,7 +331,7 @@ func TestSignAndVerify_BadAudience(t *testing.T) {
 	}
 
 	opts := VerifyOptions{Aud: []string{"expected-aud"}}
-	_, err = ParseAndVerify[map[string]any](priv, &parsedHeader, token, &opts)
+	_, err = ParseAndVerify[map[string]any](priv, parsedHeader, token, &opts)
 	if err != ErrInvalidAudience {
 		t.Fatalf("expected ErrInvalidAudience, got %v", err)
 	}
@@ -357,7 +357,7 @@ func TestSignAndVerify_BadIssuer(t *testing.T) {
 	}
 
 	opts := VerifyOptions{Iss: []string{"expected-iss"}}
-	_, err = ParseAndVerify[map[string]any](priv, &parsedHeader, token, &opts)
+	_, err = ParseAndVerify[map[string]any](priv, parsedHeader, token, &opts)
 	if err != ErrInvalidIssuer {
 		t.Fatalf("expected ErrInvalidIssuer, got %v", err)
 	}
@@ -384,7 +384,7 @@ func TestParseAndVerify_WrongKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = ParseAndVerify[map[string]any](wrongPriv, &parsedHeader, token, nil)
+	_, err = ParseAndVerify[map[string]any](wrongPriv, parsedHeader, token, nil)
 	if err != ErrInvalidSignature {
 		t.Fatalf("expected ErrInvalidSignature, got %v", err)
 	}
@@ -425,7 +425,7 @@ func TestSign_WrongAlgorithm(t *testing.T) {
 
 func TestVerify_UnsupportedKeyType(t *testing.T) {
 	header := Header{Typ: JWT, Alg: EdDSA}
-	_, err := ParseAndVerify[any]("not-a-key", &header, "a.b.cA", nil)
+	_, err := ParseAndVerify[any]("not-a-key", header, "a.b.cA", nil)
 	if err != ErrUnsupportedKeyType {
 		t.Fatalf("expected ErrUnsupportedKeyType, got %v", err)
 	}
@@ -450,7 +450,7 @@ func TestParseAndVerify_RSAPSS(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		_, err = ParseAndVerify[map[string]any](&priv.PublicKey, &parsedHeader, token, nil)
+		_, err = ParseAndVerify[map[string]any](&priv.PublicKey, parsedHeader, token, nil)
 		if err != nil {
 			t.Fatalf("Verify(%s): %v", alg, err)
 		}
@@ -482,7 +482,7 @@ func TestSignAndVerify_TimeDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = ParseAndVerify[map[string]any](priv, &parsedHeader, token, &opts)
+	_, err = ParseAndVerify[map[string]any](priv, parsedHeader, token, &opts)
 	if err != nil {
 		t.Fatalf("expected token within drift to be valid, got %v", err)
 	}

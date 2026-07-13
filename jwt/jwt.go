@@ -51,6 +51,15 @@
 //	 if err != nil { log.Fatal(err) }
 //	 fmt.Printf("Algorithm: %s, Key ID: %s\n", jwk.Alg, jwk.KID)
 //	 _ = jwk.Key.(ed25519.PrivateKey)
+//	 //
+//	 // Parse a JWK Set (JWKS):
+//	 //
+//	 //	jwksJSON := []byte(`{"keys":[{...}, {...}]}`)
+//	 //	keys, err := jwt.ParseJWKS(jwksJSON)
+//	 //	if err != nil { log.Fatal(err) }
+//	 //	for _, key := range keys {
+//	 //		fmt.Printf("Key: %s, Alg: %s\n", key.ID, key.Alg)
+//	 //	}
 package jwt
 
 import (
@@ -209,15 +218,16 @@ func Sign(key any, header *Header, claims any) (string, error) {
 		return "", err
 	}
 
-	base64HeaderLength := base64.RawURLEncoding.EncodedLen(len(headerJSON))
-	base64ClaimsLength := base64.RawURLEncoding.EncodedLen(len(claimsJSON))
+	buf := make([]byte, 0,
+		base64.RawURLEncoding.EncodedLen(len(headerJSON))+
+			base64.RawURLEncoding.EncodedLen(len(claimsJSON))+
+			2+
+			base64.RawURLEncoding.EncodedLen(512),
+	)
 
-	token := strings.Builder{}
-	token.Grow(base64HeaderLength + base64ClaimsLength + 2 + base64.RawURLEncoding.EncodedLen(64))
-
-	token.WriteString(base64.RawURLEncoding.EncodeToString(headerJSON))
-	token.WriteByte('.')
-	token.WriteString(base64.RawURLEncoding.EncodeToString(claimsJSON))
+	buf = appendBase64(buf, headerJSON)
+	buf = append(buf, '.')
+	buf = appendBase64(buf, claimsJSON)
 
 	var signature []byte
 	switch k := key.(type) {
@@ -225,7 +235,7 @@ func Sign(key any, header *Header, claims any) (string, error) {
 		if header.Alg != EdDSA {
 			return "", ErrInvalidAlgorithm
 		}
-		signature = ed25519.Sign(k, []byte(token.String()))
+		signature = ed25519.Sign(k, buf)
 
 	case *ecdsa.PrivateKey:
 		_, expectedAlg, _, err := curveInfo(k.Curve)
@@ -235,7 +245,7 @@ func Sign(key any, header *Header, claims any) (string, error) {
 		if header.Alg != expectedAlg {
 			return "", ErrInvalidAlgorithm
 		}
-		signature, err = ecdsaSign(k, []byte(token.String()), header.Alg)
+		signature, err = ecdsaSign(k, buf, header.Alg)
 		if err != nil {
 			return "", err
 		}
@@ -244,7 +254,7 @@ func Sign(key any, header *Header, claims any) (string, error) {
 		if !header.Alg.isRSA() {
 			return "", ErrInvalidAlgorithm
 		}
-		signature, err = rsaSign(k, []byte(token.String()), header.Alg)
+		signature, err = rsaSign(k, buf, header.Alg)
 		if err != nil {
 			return "", err
 		}
@@ -253,15 +263,15 @@ func Sign(key any, header *Header, claims any) (string, error) {
 		if !header.Alg.isHMAC() {
 			return "", ErrInvalidAlgorithm
 		}
-		signature = hmacSign([]byte(token.String()), k, header.Alg)
+		signature = hmacSign(buf, k, header.Alg)
 
 	default:
 		return "", ErrUnsupportedKeyType
 	}
 
-	token.WriteByte('.')
-	token.WriteString(base64.RawURLEncoding.EncodeToString(signature))
-	return token.String(), nil
+	buf = append(buf, '.')
+	buf = appendBase64(buf, signature)
+	return string(buf), nil
 }
 
 // ParseHeader extracts and decodes the header from a JWT token without verifying.
@@ -304,7 +314,7 @@ func ParseHeader(token string) (Header, error) {
 //	*ecdsa.PrivateKey / *ecdsa.PublicKey    -> ES256/ES384/ES512
 //	*rsa.PublicKey                          -> RS*/PS*
 //	[]byte                                  -> HS*
-func ParseAndVerify[C any](key any, header *Header, token string, opts *VerifyOptions) (claims C, err error) {
+func ParseAndVerify[C any](key any, header Header, token string, opts *VerifyOptions) (claims C, err error) {
 	dotsCount := strings.Count(token, ".")
 	if dotsCount != 2 {
 		return claims, ErrInvalidToken
@@ -339,18 +349,38 @@ func ParseAndVerify[C any](key any, header *Header, token string, opts *VerifyOp
 		return claims, ErrInvalidToken
 	}
 
-	if err = validateClaims(claimsJSON, opts); err != nil {
-		return claims, err
+	if opts != nil {
+		hasValidation := opts.Exp || opts.Nbf || len(opts.Aud) > 0 || len(opts.Iss) > 0
+		if hasValidation {
+			if err = json.Unmarshal(claimsJSON, &claims); err != nil {
+				return claims, ErrInvalidToken
+			}
+			if claimsMap, ok := any(claims).(map[string]any); ok {
+				if err = validateClaimsMap(claimsMap, opts); err != nil {
+					return claims, err
+				}
+				return claims, nil
+			}
+			if err = validateClaims(claimsJSON, opts); err != nil {
+				return claims, err
+			}
+			return claims, nil
+		}
 	}
 
-	if err = json.Unmarshal(claimsJSON, &claims); err != nil {
-		return claims, err
-	}
-
-	return claims, nil
+	err = json.Unmarshal(claimsJSON, &claims)
+	return
 }
 
 // ── signing / verification helpers ──────────────────────────
+
+func appendBase64(buf, data []byte) []byte {
+	n := base64.RawURLEncoding.EncodedLen(len(data))
+	base64Buf := make([]byte, n)
+	base64.RawURLEncoding.Encode(base64Buf, data)
+	buf = append(buf, base64Buf...)
+	return buf
+}
 
 func hmacSign(message, key []byte, alg Algorithm) []byte {
 	mac := hmac.New(hashFunc(alg), key)
@@ -501,28 +531,14 @@ func verify(key any, message, sig []byte, alg Algorithm) error {
 	}
 }
 
-func validateClaims(claimsJSON []byte, opts *VerifyOptions) error {
-	if opts == nil {
-		return nil
-	}
-
-	hasValidation := opts.Exp || opts.Nbf || len(opts.Aud) > 0 || len(opts.Iss) > 0
-	if !hasValidation {
-		return nil
-	}
-
-	raw := make(map[string]any, 4)
-	if err := json.Unmarshal(claimsJSON, &raw); err != nil {
-		return nil
-	}
-
+func validateClaimsMap(claims map[string]any, opts *VerifyOptions) error {
 	now := time.Now().Unix()
 
 	if opts.Exp {
-		if expRaw, ok := raw["exp"]; ok {
-			exp := numericDate(expRaw)
-			if exp == 0 {
-				return ErrMissingField
+		if expRaw, ok := claims["exp"]; ok {
+			exp, err := timestampFromJson(expRaw)
+			if err != nil {
+				return err
 			}
 			if exp < now-int64(opts.AllowedTimeDrift.Seconds()) {
 				return ErrTokenExpired
@@ -533,10 +549,10 @@ func validateClaims(claimsJSON []byte, opts *VerifyOptions) error {
 	}
 
 	if opts.Nbf {
-		if nbfRaw, ok := raw["nbf"]; ok {
-			nbf := numericDate(nbfRaw)
-			if nbf == 0 {
-				return ErrMissingField
+		if nbfRaw, ok := claims["nbf"]; ok {
+			nbf, err := timestampFromJson(nbfRaw)
+			if err != nil {
+				return err
 			}
 			if nbf > now+int64(opts.AllowedTimeDrift.Seconds()) {
 				return ErrTokenNotYetValid
@@ -547,7 +563,7 @@ func validateClaims(claimsJSON []byte, opts *VerifyOptions) error {
 	}
 
 	if len(opts.Aud) > 0 {
-		audRaw, ok := raw["aud"]
+		audRaw, ok := claims["aud"]
 		if !ok {
 			return ErrMissingField
 		}
@@ -565,7 +581,7 @@ func validateClaims(claimsJSON []byte, opts *VerifyOptions) error {
 	}
 
 	if len(opts.Iss) > 0 {
-		issRaw, ok := raw["iss"]
+		issRaw, ok := claims["iss"]
 		if !ok {
 			return ErrMissingField
 		}
@@ -582,16 +598,34 @@ func validateClaims(claimsJSON []byte, opts *VerifyOptions) error {
 	return nil
 }
 
-func numericDate(v any) int64 {
+func validateClaims(claimsJSON []byte, opts *VerifyOptions) error {
+	if opts == nil {
+		return nil
+	}
+
+	hasValidation := opts.Exp || opts.Nbf || len(opts.Aud) > 0 || len(opts.Iss) > 0
+	if !hasValidation {
+		return nil
+	}
+
+	raw := make(map[string]any, 4)
+	if err := json.Unmarshal(claimsJSON, &raw); err != nil {
+		return nil
+	}
+
+	return validateClaimsMap(raw, opts)
+}
+
+func timestampFromJson(v any) (int64, error) {
 	switch n := v.(type) {
 	case float64:
-		return int64(n)
+		return int64(n), nil
 	case int64:
-		return n
+		return n, nil
 	case uint64:
-		return int64(n)
+		return int64(n), nil
 	case int:
-		return int64(n)
+		return int64(n), nil
 	}
-	return 0
+	return 0, ErrMissingField
 }

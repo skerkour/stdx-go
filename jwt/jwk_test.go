@@ -31,8 +31,8 @@ func TestJWKRoundTrip_Ed25519PrivateKey(t *testing.T) {
 	if result.Alg != EdDSA {
 		t.Fatalf("expected Alg EdDSA, got %s", result.Alg)
 	}
-	if result.KID != kid {
-		t.Fatalf("expected KID %s, got %s", kid, result.KID)
+	if result.ID != kid {
+		t.Fatalf("expected KID %s, got %s", kid, result.ID)
 	}
 
 	parsed, ok := result.Key.(ed25519.PrivateKey)
@@ -92,8 +92,8 @@ func TestJWKRoundTrip_ECDSAP256PrivateKey(t *testing.T) {
 	if result.Alg != ES256 {
 		t.Fatalf("expected Alg ES256, got %s", result.Alg)
 	}
-	if result.KID != "p256" {
-		t.Fatalf("expected KID p256, got %s", result.KID)
+	if result.ID != "p256" {
+		t.Fatalf("expected KID p256, got %s", result.ID)
 	}
 
 	parsed, ok := result.Key.(*ecdsa.PrivateKey)
@@ -213,8 +213,8 @@ func TestJWKRoundTrip_RSAPrivateKey(t *testing.T) {
 	if result.Alg != RS256 {
 		t.Fatalf("expected Alg RS256, got %s", result.Alg)
 	}
-	if result.KID != "rsa-2048" {
-		t.Fatalf("expected KID rsa-2048, got %s", result.KID)
+	if result.ID != "rsa-2048" {
+		t.Fatalf("expected KID rsa-2048, got %s", result.ID)
 	}
 
 	parsed, ok := result.Key.(*rsa.PrivateKey)
@@ -575,8 +575,8 @@ func TestJWKVector_RSA(t *testing.T) {
 	if result.Alg != RS256 {
 		t.Fatalf("expected Alg RS256, got %s", result.Alg)
 	}
-	if result.KID != "test-rsa-kid" {
-		t.Fatalf("expected KID test-rsa-kid, got %s", result.KID)
+	if result.ID != "test-rsa-kid" {
+		t.Fatalf("expected KID test-rsa-kid, got %s", result.ID)
 	}
 
 	pub, ok := result.Key.(*rsa.PrivateKey)
@@ -643,8 +643,8 @@ func TestJWKRoundTrip_Ed25519EmptyKID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.KID != "" {
-		t.Fatalf("expected empty KID, got %s", result.KID)
+	if result.ID != "" {
+		t.Fatalf("expected empty KID, got %s", result.ID)
 	}
 }
 
@@ -658,8 +658,8 @@ func TestJWKParse_OctWithAlg(t *testing.T) {
 	if result.Alg != HS256 {
 		t.Fatalf("expected HS256, got %s", result.Alg)
 	}
-	if result.KID != "sym-key" {
-		t.Fatalf("expected sym-key, got %s", result.KID)
+	if result.ID != "sym-key" {
+		t.Fatalf("expected sym-key, got %s", result.ID)
 	}
 	key, ok := result.Key.([]byte)
 	if !ok {
@@ -667,5 +667,200 @@ func TestJWKParse_OctWithAlg(t *testing.T) {
 	}
 	if string(key) != "foobar" {
 		t.Fatalf("expected foobar, got %s", key)
+	}
+}
+
+// ── JWKS (JSON Web Key Set) ─────────────────────────────────
+
+func TestJWKSRoundTrip_MixedKeys(t *testing.T) {
+	_, edPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hmacKey := make([]byte, 32)
+	rand.Read(hmacKey)
+
+	edJWK, err := EncodeToJWK(edPriv, EdDSA, "ed25519-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecJWK, err := EncodeToJWK(ecPriv, ES256, "ecdsa-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaJWK, err := EncodeToJWK(rsaPriv, RS256, "rsa-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hmacJWK, err := EncodeToJWK([]byte(hmacKey), HS256, "hmac-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jwksJSON := `{"keys":[` +
+		string(edJWK) + `,` +
+		string(ecJWK) + `,` +
+		string(rsaJWK) + `,` +
+		string(hmacJWK) +
+		`]}`
+
+	keys, err := ParseJWKS([]byte(jwksJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(keys) != 4 {
+		t.Fatalf("expected 4 keys, got %d", len(keys))
+	}
+
+	if keys[0].ID != "ed25519-key" || keys[0].Alg != EdDSA {
+		t.Fatalf("unexpected key 0: Alg=%s ID=%s", keys[0].Alg, keys[0].ID)
+	}
+	if _, ok := keys[0].Key.(ed25519.PrivateKey); !ok {
+		t.Fatalf("expected ed25519.PrivateKey, got %T", keys[0].Key)
+	}
+
+	if keys[1].ID != "ecdsa-key" || keys[1].Alg != ES256 {
+		t.Fatalf("unexpected key 1: Alg=%s ID=%s", keys[1].Alg, keys[1].ID)
+	}
+	if _, ok := keys[1].Key.(*ecdsa.PrivateKey); !ok {
+		t.Fatalf("expected *ecdsa.PrivateKey, got %T", keys[1].Key)
+	}
+
+	if keys[2].ID != "rsa-key" || keys[2].Alg != RS256 {
+		t.Fatalf("unexpected key 2: Alg=%s ID=%s", keys[2].Alg, keys[2].ID)
+	}
+	if _, ok := keys[2].Key.(*rsa.PrivateKey); !ok {
+		t.Fatalf("expected *rsa.PrivateKey, got %T", keys[2].Key)
+	}
+
+	if keys[3].ID != "hmac-key" || keys[3].Alg != HS256 {
+		t.Fatalf("unexpected key 3: Alg=%s ID=%s", keys[3].Alg, keys[3].ID)
+	}
+	if _, ok := keys[3].Key.([]byte); !ok {
+		t.Fatalf("expected []byte, got %T", keys[3].Key)
+	}
+}
+
+func TestJWKS_EmptySet(t *testing.T) {
+	keys, err := ParseJWKS([]byte(`{"keys":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 0 {
+		t.Fatalf("expected 0 keys, got %d", len(keys))
+	}
+}
+
+func TestJWKS_SingleKey(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwkJSON, err := EncodeToJWK(priv, EdDSA, "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwksJSON := `{"keys":[` + string(jwkJSON) + `]}`
+
+	keys, err := ParseJWKS([]byte(jwksJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(keys))
+	}
+	if keys[0].ID != "single" {
+		t.Fatalf("expected ID single, got %s", keys[0].ID)
+	}
+}
+
+func TestJWKS_WithPublicKeys(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecPriv, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	edJWK, err := EncodeToJWK(pub, EdDSA, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecJWK, err := EncodeToJWK(&ecPriv.PublicKey, ES384, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jwksJSON := `{"keys":[` + string(edJWK) + `,` + string(ecJWK) + `]}`
+	keys, err := ParseJWKS([]byte(jwksJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(keys) != 2 {
+		t.Fatalf("expected 2 keys, got %d", len(keys))
+	}
+	if keys[0].Alg != EdDSA {
+		t.Fatalf("expected EdDSA, got %s", keys[0].Alg)
+	}
+	if keys[1].Alg != ES384 {
+		t.Fatalf("expected ES384, got %s", keys[1].Alg)
+	}
+}
+
+// ── JWKS Error cases ────────────────────────────────────────
+
+func TestJWKSError_BadJSON(t *testing.T) {
+	_, err := ParseJWKS([]byte(`{bad json`))
+	if err != ErrInvalidJWK {
+		t.Fatalf("expected ErrInvalidJWK, got %v", err)
+	}
+}
+
+func TestJWKSError_NoKeysField(t *testing.T) {
+	_, err := ParseJWKS([]byte(`{"kty":"RSA"}`))
+	if err != ErrInvalidJWK {
+		t.Fatalf("expected ErrInvalidJWK, got %v", err)
+	}
+}
+
+func TestJWKSError_KeysNotArray(t *testing.T) {
+	_, err := ParseJWKS([]byte(`{"keys":"not-an-array"}`))
+	if err != ErrInvalidJWK {
+		t.Fatalf("expected ErrInvalidJWK, got %v", err)
+	}
+}
+
+func TestJWKSError_InvalidKeyInSet(t *testing.T) {
+	jwksJSON := `{"keys":[
+		{"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaNcAlUM"},
+		{"kty":"UNKNOWN"}
+	]}`
+
+	_, err := ParseJWKS([]byte(jwksJSON))
+	if err != ErrUnsupportedKeyType {
+		t.Fatalf("expected ErrUnsupportedKeyType, got %v", err)
+	}
+}
+
+func TestJWKSError_BadBase64InSet(t *testing.T) {
+	jwksJSON := `{"keys":[
+		{"kty":"oct","k":"!!!not-base64!!!"}
+	]}`
+
+	_, err := ParseJWKS([]byte(jwksJSON))
+	if err != ErrInvalidJWK {
+		t.Fatalf("expected ErrInvalidJWK, got %v", err)
 	}
 }
