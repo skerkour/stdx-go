@@ -34,32 +34,27 @@
 //
 // # JWK
 //
-// Example of encoding a Go crypto key to JWK format and parsing it back:
+// Encode a Go crypto key to JWK JSON using json.Marshal,
+// and parse it back using json.Unmarshal:
 //
 //	import "github.com/skerkour/stdx-go/jwt"
 //
-//	 // Encode a key to RFC 7517 JWK JSON.
+//	 // Marshal a key to RFC 7517 JWK JSON.
 //	 _, priv, _ := ed25519.GenerateKey(rand.Reader)
-//	 jwkJSON, err := jwt.EncodeToJWK(priv, jwt.EdDSA, "my-key-id")
-//	 if err != nil {
-//	 	log.Fatal(err) }
-//	 }
+//	 jwk := jwt.JWK{Key: priv, Alg: jwt.EdDSA, ID: "my-key-id"}
+//	 jwkJSON, err := json.Marshal(jwk)
+//	 if err != nil { log.Fatal(err) }
 //	 fmt.Println(string(jwkJSON))
 //
-//	 // Parse JWK JSON back into a Go crypto key.
-//	 jwk, err := jwt.ParseJWK(jwkJSON)
-//	 if err != nil { log.Fatal(err) }
-//	 fmt.Printf("Algorithm: %s, Key ID: %s\n", jwk.Alg, jwk.KID)
-//	 _ = jwk.Key.(ed25519.PrivateKey)
-//	 //
+//	 // Unmarshal JWK JSON back into a Go crypto key.
+//	 var parsed jwt.JWK
+//	 if err := json.Unmarshal(jwkJSON, &parsed); err != nil { log.Fatal(err) }
+//	 fmt.Printf("Algorithm: %s, Key ID: %s\n", parsed.Alg, parsed.ID)
+//	 _ = parsed.Key.(ed25519.PrivateKey)
+//
 //	 // Parse a JWK Set (JWKS):
-//	 //
-//	 //	jwksJSON := []byte(`{"keys":[{...}, {...}]}`)
-//	 //	keys, err := jwt.ParseJWKS(jwksJSON)
-//	 //	if err != nil { log.Fatal(err) }
-//	 //	for _, key := range keys {
-//	 //		fmt.Printf("Key: %s, Alg: %s\n", key.ID, key.Alg)
-//	 //	}
+//	 var set struct { Keys []jwt.JWK `json:"keys"` }
+//	 if err := json.Unmarshal(jwksJSON, &set); err != nil { log.Fatal(err) }
 package jwt
 
 import (
@@ -81,17 +76,19 @@ import (
 )
 
 var (
-	ErrUnsupportedKeyType = errors.New("jwt: unsupported key type")
-	ErrUnsupportedCurve   = errors.New("jwt: unsupported elliptic curve")
-	ErrInvalidAlgorithm   = errors.New("jwt: invalid algorithm for key type")
-	ErrInvalidJWK         = errors.New("jwt: invalid JWK")
-	ErrMissingField       = errors.New("jwt: missing required JWK field")
-	ErrInvalidSignature   = errors.New("jwt: invalid signature")
-	ErrInvalidToken       = errors.New("jwt: invalid token format")
-	ErrTokenExpired       = errors.New("jwt: token is expired")
-	ErrTokenNotYetValid   = errors.New("jwt: token is not yet valid")
-	ErrInvalidAudience    = errors.New("jwt: invalid audience")
-	ErrInvalidIssuer      = errors.New("jwt: invalid issuer")
+	ErrUnsupportedKeyType   = errors.New("jwt: unsupported key type")
+	ErrUnsupportedCurve     = errors.New("jwt: unsupported elliptic curve")
+	ErrInvalidAlgorithm     = errors.New("jwt: invalid algorithm for key type")
+	ErrInvalidJWK           = errors.New("jwt: invalid JWK")
+	ErrMissingField         = errors.New("jwt: missing required JWK field")
+	ErrInvalidSignature     = errors.New("jwt: invalid signature")
+	ErrInvalidToken         = errors.New("jwt: invalid token format")
+	ErrTokenExpired         = errors.New("jwt: token is expired")
+	ErrTokenNotYetValid     = errors.New("jwt: token is not yet valid")
+	ErrInvalidAudience      = errors.New("jwt: invalid audience")
+	ErrInvalidIssuer        = errors.New("jwt: invalid issuer")
+	ErrKeyIsTooShort        = errors.New("jwt: key is too short")
+	ErrUnsupportedAlgorithm = errors.New("jwt: unsupported algorithm")
 )
 
 // Algorithm identifies the signing/verification algorithm for a JWT.
@@ -162,6 +159,14 @@ func (a Algorithm) isECDSA() bool {
 	return false
 }
 
+func (a Algorithm) isSupported() bool {
+	switch a {
+	case HS256, HS384, HS512, EdDSA, ES256, ES384, ES512, RS256, RS384, RS512, PS256, PS384, PS512:
+		return true
+	}
+	return false
+}
+
 // TokenType represents the type of a JWT token.
 type TokenType string
 
@@ -208,7 +213,7 @@ type VerifyOptions struct {
 //	ed25519.PrivateKey  -> EdDSA
 //	*ecdsa.PrivateKey   -> ES256/ES384/ES512 (derived from curve)
 //	[]byte              -> HS256/HS384/HS512 (must match header alg)
-func Sign(key any, header *Header, claims any) (string, error) {
+func Sign(keyAny any, header *Header, claims any) (string, error) {
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
 		return "", err
@@ -225,12 +230,12 @@ func Sign(key any, header *Header, claims any) (string, error) {
 			base64.RawURLEncoding.EncodedLen(512),
 	)
 
-	buf = appendBase64(buf, headerJSON)
+	buf = base64.RawURLEncoding.AppendEncode(buf, headerJSON)
 	buf = append(buf, '.')
-	buf = appendBase64(buf, claimsJSON)
+	buf = base64.RawURLEncoding.AppendEncode(buf, claimsJSON)
 
 	var signature []byte
-	switch k := key.(type) {
+	switch k := keyAny.(type) {
 	case ed25519.PrivateKey:
 		if header.Alg != EdDSA {
 			return "", ErrInvalidAlgorithm
@@ -263,14 +268,21 @@ func Sign(key any, header *Header, claims any) (string, error) {
 		if !header.Alg.isHMAC() {
 			return "", ErrInvalidAlgorithm
 		}
-		signature = hmacSign(buf, k, header.Alg)
+		if len(k) < 32 {
+			return "", ErrKeyIsTooShort
+		}
+		sig, hmErr := hmacSign(buf, k, header.Alg)
+		if hmErr != nil {
+			return "", hmErr
+		}
+		signature = sig
 
 	default:
 		return "", ErrUnsupportedKeyType
 	}
 
 	buf = append(buf, '.')
-	buf = appendBase64(buf, signature)
+	buf = base64.RawURLEncoding.AppendEncode(buf, signature)
 	return string(buf), nil
 }
 
@@ -298,8 +310,12 @@ func ParseHeader(token string) (Header, error) {
 		return Header{}, ErrInvalidToken
 	}
 
-	if header.Alg == "" || header.Typ != JWT {
+	if header.Alg == "" || (header.Typ != "" && header.Typ != JWT) {
 		return Header{}, ErrInvalidToken
+	}
+
+	if !header.Alg.isSupported() {
+		return Header{}, ErrUnsupportedAlgorithm
 	}
 
 	return header, nil
@@ -374,98 +390,129 @@ func ParseAndVerify[C any](key any, header Header, token string, opts *VerifyOpt
 
 // ── signing / verification helpers ──────────────────────────
 
-func appendBase64(buf, data []byte) []byte {
-	n := base64.RawURLEncoding.EncodedLen(len(data))
-	base64Buf := make([]byte, n)
-	base64.RawURLEncoding.Encode(base64Buf, data)
-	buf = append(buf, base64Buf...)
-	return buf
-}
-
-func hmacSign(message, key []byte, alg Algorithm) []byte {
-	mac := hmac.New(hashFunc(alg), key)
+func hmacSign(message, key []byte, alg Algorithm) ([]byte, error) {
+	h, err := hashFunc(alg)
+	if err != nil {
+		return nil, err
+	}
+	mac := hmac.New(h, key)
 	mac.Write(message)
-	return mac.Sum(nil)
+	return mac.Sum(nil), nil
 }
 
-func hmacVerify(message, key, sig []byte, alg Algorithm) bool {
-	expected := hmacSign(message, key, alg)
-	return hmac.Equal(sig, expected)
+func hmacVerify(message, key, sig []byte, alg Algorithm) error {
+	expected, err := hmacSign(message, key, alg)
+	if err != nil {
+		return err
+	}
+	if !hmac.Equal(sig, expected) {
+		return ErrInvalidSignature
+	}
+	return nil
 }
 
 func ecdsaSign(key *ecdsa.PrivateKey, message []byte, alg Algorithm) ([]byte, error) {
-	h := hashFunc(alg)()
-	h.Write(message)
-	digest := h.Sum(nil)
+	h, err := hashFunc(alg)
+	if err != nil {
+		return nil, err
+	}
+	hash := h()
+	hash.Write(message)
+	digest := hash.Sum(nil)
 	return ecdsa.SignASN1(cryptoRand.Reader, key, digest)
 }
 
 func rsaSign(key *rsa.PrivateKey, message []byte, alg Algorithm) ([]byte, error) {
-	h := hashFunc(alg)()
-	h.Write(message)
-	digest := h.Sum(nil)
+	h, err := hashFunc(alg)
+	if err != nil {
+		return nil, err
+	}
+	hash := h()
+	hash.Write(message)
+	digest := hash.Sum(nil)
+
+	cryptoHash, err := hashFuncCrypto(alg)
+	if err != nil {
+		return nil, err
+	}
 
 	switch alg {
 	case RS256, RS384, RS512:
-		return rsa.SignPKCS1v15(nil, key, hashFuncCrypto(alg), digest)
+		return rsa.SignPKCS1v15(nil, key, cryptoHash, digest)
 	case PS256, PS384, PS512:
-		return rsa.SignPSS(cryptoRand.Reader, key, hashFuncCrypto(alg), digest, nil)
+		return rsa.SignPSS(cryptoRand.Reader, key, cryptoHash, digest, nil)
 	}
 	return nil, ErrInvalidAlgorithm
 }
 
-func ecdsaVerify(pub *ecdsa.PublicKey, message, sig []byte, alg Algorithm) bool {
-	h := hashFunc(alg)()
-	h.Write(message)
-	digest := h.Sum(nil)
-	return ecdsa.VerifyASN1(pub, digest, sig)
+func ecdsaVerify(pub *ecdsa.PublicKey, message, sig []byte, alg Algorithm) error {
+	h, err := hashFunc(alg)
+	if err != nil {
+		return err
+	}
+	hash := h()
+	hash.Write(message)
+	digest := hash.Sum(nil)
+	if !ecdsa.VerifyASN1(pub, digest, sig) {
+		return ErrInvalidSignature
+	}
+	return nil
 }
 
 func rsaVerify(pub *rsa.PublicKey, message, sig []byte, alg Algorithm) error {
-	h := hashFunc(alg)()
-	h.Write(message)
-	digest := h.Sum(nil)
+	h, err := hashFunc(alg)
+	if err != nil {
+		return err
+	}
+	hash := h()
+	hash.Write(message)
+	digest := hash.Sum(nil)
+
+	cryptoHash, err := hashFuncCrypto(alg)
+	if err != nil {
+		return err
+	}
 
 	switch alg {
 	case RS256, RS384, RS512:
-		return rsa.VerifyPKCS1v15(pub, hashFuncCrypto(alg), digest, sig)
+		return rsa.VerifyPKCS1v15(pub, cryptoHash, digest, sig)
 	case PS256, PS384, PS512:
-		return rsa.VerifyPSS(pub, hashFuncCrypto(alg), digest, sig, nil)
+		return rsa.VerifyPSS(pub, cryptoHash, digest, sig, nil)
 	}
 	return ErrInvalidAlgorithm
 }
 
-func hashFunc(alg Algorithm) func() hash.Hash {
+func hashFunc(alg Algorithm) (func() hash.Hash, error) {
 	switch alg {
 	case HS256, ES256, RS256, PS256:
-		return sha256.New
+		return sha256.New, nil
 	case HS384, ES384, RS384, PS384:
-		return sha512.New384
+		return sha512.New384, nil
 	case HS512, ES512, RS512, PS512:
-		return sha512.New
+		return sha512.New, nil
 	}
-	return sha256.New
+	return nil, ErrInvalidAlgorithm
 }
 
-func hashFuncCrypto(alg Algorithm) crypto.Hash {
+func hashFuncCrypto(alg Algorithm) (crypto.Hash, error) {
 	switch alg {
 	case RS256, PS256:
-		return crypto.SHA256
+		return crypto.SHA256, nil
 	case RS384, PS384:
-		return crypto.SHA384
+		return crypto.SHA384, nil
 	case RS512, PS512:
-		return crypto.SHA512
+		return crypto.SHA512, nil
 	}
-	return crypto.SHA256
+	return 0, ErrInvalidAlgorithm
 }
 
-func verify(key any, message, sig []byte, alg Algorithm) error {
-	switch k := key.(type) {
+func verify(keyAny any, message, sig []byte, alg Algorithm) error {
+	switch key := keyAny.(type) {
 	case ed25519.PrivateKey:
 		if alg != EdDSA {
 			return ErrInvalidAlgorithm
 		}
-		if !ed25519.Verify(k.Public().(ed25519.PublicKey), message, sig) {
+		if !ed25519.Verify(key.Public().(ed25519.PublicKey), message, sig) {
 			return ErrInvalidSignature
 		}
 		return nil
@@ -474,57 +521,49 @@ func verify(key any, message, sig []byte, alg Algorithm) error {
 		if alg != EdDSA {
 			return ErrInvalidAlgorithm
 		}
-		if !ed25519.Verify(k, message, sig) {
+		if !ed25519.Verify(key, message, sig) {
 			return ErrInvalidSignature
 		}
 		return nil
 
 	case *ecdsa.PrivateKey:
-		_, expectedAlg, _, err := curveInfo(k.Curve)
+		_, expectedAlg, _, err := curveInfo(key.Curve)
 		if err != nil {
 			return err
 		}
 		if alg != expectedAlg {
 			return ErrInvalidAlgorithm
 		}
-		if !ecdsaVerify(&k.PublicKey, message, sig, alg) {
-			return ErrInvalidSignature
-		}
-		return nil
+		return ecdsaVerify(&key.PublicKey, message, sig, alg)
 
 	case *ecdsa.PublicKey:
-		_, expectedAlg, _, err := curveInfo(k.Curve)
+		_, expectedAlg, _, err := curveInfo(key.Curve)
 		if err != nil {
 			return err
 		}
 		if alg != expectedAlg {
 			return ErrInvalidAlgorithm
 		}
-		if !ecdsaVerify(k, message, sig, alg) {
-			return ErrInvalidSignature
-		}
-		return nil
+		return ecdsaVerify(key, message, sig, alg)
 
 	case *rsa.PublicKey:
 		if !alg.isRSA() {
 			return ErrInvalidAlgorithm
 		}
-		return rsaVerify(k, message, sig, alg)
+		return rsaVerify(key, message, sig, alg)
 
 	case *rsa.PrivateKey:
 		if !alg.isRSA() {
 			return ErrInvalidAlgorithm
 		}
-		return rsaVerify(&k.PublicKey, message, sig, alg)
+		return rsaVerify(&key.PublicKey, message, sig, alg)
 
 	case []byte:
 		if !alg.isHMAC() {
 			return ErrInvalidAlgorithm
 		}
-		if !hmacVerify(message, k, sig, alg) {
-			return ErrInvalidSignature
-		}
-		return nil
+
+		return hmacVerify(message, key, sig, alg)
 
 	default:
 		return ErrUnsupportedKeyType
@@ -567,15 +606,23 @@ func validateClaimsMap(claims map[string]any, opts *VerifyOptions) error {
 		if !ok {
 			return ErrMissingField
 		}
-		var tokenAud string
 		switch v := audRaw.(type) {
 		case string:
-			tokenAud = v
+			if !slices.Contains(opts.Aud, v) {
+				return ErrInvalidAudience
+			}
+		case []any:
+			found := false
+			for _, a := range v {
+				if s, ok := a.(string); ok && slices.Contains(opts.Aud, s) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return ErrInvalidAudience
+			}
 		default:
-			return ErrInvalidAudience
-		}
-
-		if !slices.Contains(opts.Aud, tokenAud) {
 			return ErrInvalidAudience
 		}
 	}
@@ -587,7 +634,7 @@ func validateClaimsMap(claims map[string]any, opts *VerifyOptions) error {
 		}
 		tokenIss, ok := issRaw.(string)
 		if !ok {
-			return ErrMissingField
+			return ErrInvalidIssuer
 		}
 
 		if !slices.Contains(opts.Iss, tokenIss) {
@@ -619,6 +666,9 @@ func validateClaims(claimsJSON []byte, opts *VerifyOptions) error {
 func timestampFromJson(v any) (int64, error) {
 	switch n := v.(type) {
 	case float64:
+		if float64(int64(n)) != n {
+			return 0, ErrMissingField
+		}
 		return int64(n), nil
 	case int64:
 		return n, nil

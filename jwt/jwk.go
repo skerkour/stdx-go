@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rsa"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"math/big"
 )
@@ -17,6 +18,10 @@ type JWK struct {
 	ID  string
 	Alg Algorithm
 	Key any
+}
+
+type JWKS struct {
+	Keys []JWK `json:"keys"`
 }
 
 type jwkFields struct {
@@ -38,19 +43,13 @@ type jwkFields struct {
 	K   string `json:"k,omitempty"`
 }
 
-// EncodeToJWK serializes a Go crypto key to RFC 7517 JSON.
-//
-// Supported key types:
-//
-//	ed25519.PrivateKey / ed25519.PublicKey  -> OKP Ed25519 (alg=EdDSA, alg parameter ignored)
-//	*ecdsa.PrivateKey / *ecdsa.PublicKey    -> EC P-256/P-384/P-521 (alg derived from curve)
-//	*rsa.PrivateKey / *rsa.PublicKey        -> RSA (alg parameter required: RS*/PS*)
-//	[]byte                                  -> oct symmetric key (alg required: HS*)
-func EncodeToJWK(keyAny any, alg Algorithm, kid string) ([]byte, error) {
-	w := newJwkWriter(128)
+// MarshalJSON implements json.Marshaler for JWK.
+// It serializes the key to RFC 7517 JSON.
+func (jwk JWK) MarshalJSON() ([]byte, error) {
+	w := newJwkWriter(280) // good without re-allocation for up to ES384 JWKs
 	w.writeByte('{')
 
-	switch key := keyAny.(type) {
+	switch key := jwk.Key.(type) {
 	case ed25519.PrivateKey:
 		if len(key) != ed25519.PrivateKeySize {
 			return nil, ErrInvalidJWK
@@ -94,14 +93,14 @@ func EncodeToJWK(keyAny any, alg Algorithm, kid string) ([]byte, error) {
 		w.writeBase64("y", bigIntFixed(key.Y, coordLen))
 
 	case *rsa.PrivateKey:
-		if !alg.isRSA() {
+		if !jwk.Alg.isRSA() {
 			return nil, ErrInvalidAlgorithm
 		}
 		key.Precompute()
 		w.writeString("kty", "RSA")
-		w.writeString("alg", string(alg))
+		w.writeString("alg", string(jwk.Alg))
 		w.writeBase64("n", key.N.Bytes())
-		w.writeBase64("e", intToBytes(uint32(key.E)))
+		w.writeIntBase64("e", uint32(key.E))
 		w.writeBase64("d", key.D.Bytes())
 		if len(key.Primes) >= 2 {
 			w.writeBase64("p", key.Primes[0].Bytes())
@@ -118,70 +117,47 @@ func EncodeToJWK(keyAny any, alg Algorithm, kid string) ([]byte, error) {
 		}
 
 	case *rsa.PublicKey:
-		if !alg.isRSA() {
+		if !jwk.Alg.isRSA() {
 			return nil, ErrInvalidAlgorithm
 		}
 		w.writeString("kty", "RSA")
-		w.writeString("alg", string(alg))
+		w.writeString("alg", string(jwk.Alg))
 		w.writeBase64("n", key.N.Bytes())
-		w.writeBase64("e", intToBytes(uint32(key.E)))
+		w.writeIntBase64("e", uint32(key.E))
 
 	case []byte:
-		if !alg.isHMAC() {
+		if !jwk.Alg.isHMAC() {
 			return nil, ErrInvalidAlgorithm
 		}
 		w.writeString("kty", "oct")
-		w.writeString("alg", string(alg))
+		w.writeString("alg", string(jwk.Alg))
 		w.writeBase64("k", key)
 
 	default:
 		return nil, ErrUnsupportedKeyType
 	}
 
-	if kid != "" {
-		w.writeString("kid", kid)
+	if jwk.ID != "" {
+		w.writeString("kid", jwk.ID)
 	}
 
 	w.writeByte('}')
 	return w.buf, nil
 }
 
-// ParseJWK decodes a JSON Web Key and returns the Go crypto key.
-// The returned JWK.Key is one of:
-//
-//	ed25519.PrivateKey, ed25519.PublicKey,
-//	*ecdsa.PrivateKey, *ecdsa.PublicKey,
-//	*rsa.PrivateKey, *rsa.PublicKey,
-//	[]byte (symmetric).
-func ParseJWK(data []byte) (JWK, error) {
+// UnmarshalJSON implements json.Unmarshaler for JWK.
+// It decodes a JSON Web Key and populates j.Key, j.Alg, and j.ID.
+func (jwk *JWK) UnmarshalJSON(data []byte) error {
 	var raw jwkFields
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return JWK{}, ErrInvalidJWK
+		return ErrInvalidJWK
 	}
-	return parseJWK(&raw)
-}
-
-// ParseJWKS decodes a JSON Web Key Set (JWKS) as defined in RFC 7517 Section 5.
-// The returned slice contains one JWK per entry in the "keys" array.
-func ParseJWKS(data []byte) ([]JWK, error) {
-	var raw struct {
-		Keys []jwkFields `json:"keys"`
+	parsed, err := parseJWK(&raw)
+	if err != nil {
+		return err
 	}
-	var err error
-
-	if err = json.Unmarshal(data, &raw); err != nil || raw.Keys == nil {
-		return nil, ErrInvalidJWK
-	}
-
-	keys := make([]JWK, len(raw.Keys))
-	for i := range raw.Keys {
-		keys[i], err = parseJWK(&raw.Keys[i])
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return keys, nil
+	*jwk = parsed
+	return nil
 }
 
 func parseJWK(raw *jwkFields) (JWK, error) {
@@ -407,7 +383,7 @@ func (w *jwkWriter) writeBase64(key string, data []byte) {
 	w.buf = append(w.buf, key...)
 	w.buf = append(w.buf, '"', ':')
 	w.buf = append(w.buf, '"')
-	w.buf = appendBase64(w.buf, data)
+	w.buf = base64.RawURLEncoding.AppendEncode(w.buf, data)
 	w.buf = append(w.buf, '"')
 }
 
@@ -415,19 +391,26 @@ func (w *jwkWriter) writeByte(b byte) {
 	w.buf = append(w.buf, b)
 }
 
-func intToBytes(v uint32) []byte {
+// Appends the given `uint32` encoded with Base64RawURL
+func (w *jwkWriter) writeIntBase64(key string, v uint32) {
 	var tmp [4]byte
-	tmp[0] = byte(v >> 24)
-	tmp[1] = byte(v >> 16)
-	tmp[2] = byte(v >> 8)
-	tmp[3] = byte(v)
+	binary.BigEndian.PutUint32(tmp[:], v)
+	// skip the trailing zeroes
 	i := 0
 	for i < 3 && tmp[i] == 0 {
 		i++
 	}
-	out := make([]byte, 4-i)
-	copy(out, tmp[i:])
-	return out
+
+	if w.hasKey {
+		w.buf = append(w.buf, ',')
+	}
+	w.hasKey = true
+	w.buf = append(w.buf, '"')
+	w.buf = append(w.buf, key...)
+	w.buf = append(w.buf, '"', ':')
+	w.buf = append(w.buf, '"')
+	w.buf = base64.RawURLEncoding.AppendEncode(w.buf, tmp[i:])
+	w.buf = append(w.buf, '"')
 }
 
 func bigIntFixed(x *big.Int, minLen int) []byte {

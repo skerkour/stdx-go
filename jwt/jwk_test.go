@@ -6,8 +6,8 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -18,13 +18,13 @@ func TestJWKRoundTrip_Ed25519PrivateKey(t *testing.T) {
 	}
 
 	kid := "test-ed25519-priv"
-	jsonData, err := EncodeToJWK(priv, EdDSA, kid)
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: EdDSA, ID: kid})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := ParseJWK(jsonData)
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -50,13 +50,13 @@ func TestJWKRoundTrip_Ed25519PublicKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	jsonData, err := EncodeToJWK(pub, EdDSA, "")
+	jsonData, err := json.Marshal(JWK{Key: pub, Alg: EdDSA})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := ParseJWK(jsonData)
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -79,13 +79,13 @@ func TestJWKRoundTrip_ECDSAP256PrivateKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	jsonData, err := EncodeToJWK(priv, ES256, "p256")
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: ES256, ID: "p256"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := ParseJWK(jsonData)
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -112,13 +112,13 @@ func TestJWKRoundTrip_ECDSAP256PublicKey(t *testing.T) {
 	}
 	pub := &priv.PublicKey
 
-	jsonData, err := EncodeToJWK(pub, ES256, "")
+	jsonData, err := json.Marshal(JWK{Key: pub, Alg: ES256})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := ParseJWK(jsonData)
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -142,13 +142,13 @@ func TestJWKRoundTrip_ECDSAP384PrivateKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	jsonData, err := EncodeToJWK(priv, ES384, "")
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: ES384})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := ParseJWK(jsonData)
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -171,13 +171,13 @@ func TestJWKRoundTrip_ECDSAP521PrivateKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	jsonData, err := EncodeToJWK(priv, ES512, "")
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: ES512})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := ParseJWK(jsonData)
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -200,13 +200,13 @@ func TestJWKRoundTrip_RSAPrivateKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	jsonData, err := EncodeToJWK(priv, RS256, "rsa-2048")
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: RS256, ID: "rsa-2048"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := ParseJWK(jsonData)
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -236,13 +236,13 @@ func TestJWKRoundTrip_RSAPublicKey(t *testing.T) {
 	}
 	pub := &priv.PublicKey
 
-	jsonData, err := EncodeToJWK(pub, PS384, "")
+	jsonData, err := json.Marshal(JWK{Key: pub, Alg: PS384})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := ParseJWK(jsonData)
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -275,14 +275,14 @@ func TestJWKRoundTrip_HMAC(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		jsonData, err := EncodeToJWK([]byte(key), tt.alg, "")
+		jsonData, err := json.Marshal(JWK{Key: []byte(key), Alg: tt.alg})
 		if err != nil {
-			t.Fatalf("EncodeToJWK(%s): %v", tt.alg, err)
+			t.Fatalf("json.Marshal(%s): %v", tt.alg, err)
 		}
 
-		result, err := ParseJWK(jsonData)
-		if err != nil {
-			t.Fatalf("ParseJWK(%s): %v", tt.alg, err)
+		var result JWK
+		if err := json.Unmarshal(jsonData, &result); err != nil {
+			t.Fatalf("json.Unmarshal(%s): %v", tt.alg, err)
 		}
 
 		if result.Alg != tt.alg {
@@ -305,13 +305,13 @@ func TestJWKRoundTrip_ECDSAalgIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	jsonData, err := EncodeToJWK(priv, "WRONG_ALG", "")
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: "WRONG_ALG"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := ParseJWK(jsonData)
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -326,13 +326,13 @@ func TestJWKRoundTrip_EdDSAalgIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	jsonData, err := EncodeToJWK(priv, "WRONG", "")
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: "WRONG"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := ParseJWK(jsonData)
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -344,15 +344,15 @@ func TestJWKRoundTrip_EdDSAalgIgnored(t *testing.T) {
 // ── Error cases ─────────────────────────────────────────────
 
 func TestJWKError_UnsupportedKeyType(t *testing.T) {
-	_, err := EncodeToJWK("not-a-key", HS256, "")
-	if err != ErrUnsupportedKeyType {
+	_, err := json.Marshal(JWK{Key: "not-a-key", Alg: HS256})
+	if !errors.Is(err, ErrUnsupportedKeyType) {
 		t.Fatalf("expected ErrUnsupportedKeyType, got %v", err)
 	}
 }
 
 func TestJWKError_InvalidEd25519Size(t *testing.T) {
-	_, err := EncodeToJWK(ed25519.PrivateKey{1, 2, 3}, EdDSA, "")
-	if err != ErrInvalidJWK {
+	_, err := json.Marshal(JWK{Key: ed25519.PrivateKey{1, 2, 3}, Alg: EdDSA})
+	if !errors.Is(err, ErrInvalidJWK) {
 		t.Fatalf("expected ErrInvalidJWK, got %v", err)
 	}
 }
@@ -363,8 +363,8 @@ func TestJWKError_ECDSAwithP224(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = EncodeToJWK(priv, ES256, "")
-	if err != ErrUnsupportedCurve {
+	_, err = json.Marshal(JWK{Key: priv, Alg: ES256})
+	if !errors.Is(err, ErrUnsupportedCurve) {
 		t.Fatalf("expected ErrUnsupportedCurve, got %v", err)
 	}
 }
@@ -375,13 +375,13 @@ func TestJWKError_RSABadAlgorithm(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = EncodeToJWK(priv, HS256, "")
-	if err != ErrInvalidAlgorithm {
+	_, err = json.Marshal(JWK{Key: priv, Alg: HS256})
+	if !errors.Is(err, ErrInvalidAlgorithm) {
 		t.Fatalf("expected ErrInvalidAlgorithm, got %v", err)
 	}
 
-	_, err = EncodeToJWK(&priv.PublicKey, HS256, "")
-	if err != ErrInvalidAlgorithm {
+	_, err = json.Marshal(JWK{Key: &priv.PublicKey, Alg: HS256})
+	if !errors.Is(err, ErrInvalidAlgorithm) {
 		t.Fatalf("expected ErrInvalidAlgorithm, got %v", err)
 	}
 }
@@ -389,42 +389,48 @@ func TestJWKError_RSABadAlgorithm(t *testing.T) {
 func TestJWKError_HMACBadAlgorithm(t *testing.T) {
 	key := make([]byte, 32)
 
-	_, err := EncodeToJWK(key, RS256, "")
-	if err != ErrInvalidAlgorithm {
+	_, err := json.Marshal(JWK{Key: key, Alg: RS256})
+	if !errors.Is(err, ErrInvalidAlgorithm) {
 		t.Fatalf("expected ErrInvalidAlgorithm, got %v", err)
 	}
 }
 
 func TestJWKError_ParseBadJSON(t *testing.T) {
-	_, err := ParseJWK([]byte("{bad json"))
-	if err != ErrInvalidJWK {
-		t.Fatalf("expected ErrInvalidJWK, got %v", err)
+	var jwk JWK
+	err := json.Unmarshal([]byte("{bad json"), &jwk)
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Fatalf("expected *json.SyntaxError, got %v (%T)", err, err)
 	}
 }
 
 func TestJWKError_ParseUnknownKTY(t *testing.T) {
-	_, err := ParseJWK([]byte(`{"kty":"UNKNOWN"}`))
+	var jwk JWK
+	err := json.Unmarshal([]byte(`{"kty":"UNKNOWN"}`), &jwk)
 	if err != ErrUnsupportedKeyType {
 		t.Fatalf("expected ErrUnsupportedKeyType, got %v", err)
 	}
 }
 
 func TestJWKError_ParseUnsupportedCurve(t *testing.T) {
-	_, err := ParseJWK([]byte(`{"kty":"EC","crv":"P-224","x":"","y":""}`))
+	var jwk JWK
+	err := json.Unmarshal([]byte(`{"kty":"EC","crv":"P-224","x":"","y":""}`), &jwk)
 	if err != ErrUnsupportedCurve {
 		t.Fatalf("expected ErrUnsupportedCurve, got %v", err)
 	}
 }
 
 func TestJWKError_ParseBadBase64(t *testing.T) {
-	_, err := ParseJWK([]byte(`{"kty":"oct","k":"!!!not-base64!!!"}`))
+	var jwk JWK
+	err := json.Unmarshal([]byte(`{"kty":"oct","k":"!!!not-base64!!!"}`), &jwk)
 	if err != ErrInvalidJWK {
 		t.Fatalf("expected ErrInvalidJWK, got %v", err)
 	}
 }
 
 func TestJWKError_ParseMissingKTY(t *testing.T) {
-	_, err := ParseJWK([]byte(`{"alg":"RS256"}`))
+	var jwk JWK
+	err := json.Unmarshal([]byte(`{"alg":"RS256"}`), &jwk)
 	if err != ErrUnsupportedKeyType {
 		t.Fatalf("expected ErrUnsupportedKeyType, got %v", err)
 	}
@@ -432,7 +438,8 @@ func TestJWKError_ParseMissingKTY(t *testing.T) {
 
 func TestJWKError_ParseNonRSAalg(t *testing.T) {
 	data := []byte(`{"kty":"RSA","n":"AQAB","e":"AQAB","alg":"HS256"}`)
-	_, err := ParseJWK(data)
+	var jwk JWK
+	err := json.Unmarshal(data, &jwk)
 	if err != ErrInvalidAlgorithm {
 		t.Fatalf("expected ErrInvalidAlgorithm, got %v", err)
 	}
@@ -448,8 +455,8 @@ func TestJWKVector_Ed25519PublicKey(t *testing.T) {
 		"alg":"EdDSA"
 	}`
 
-	result, err := ParseJWK([]byte(knownJWK))
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal([]byte(knownJWK), &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -462,11 +469,9 @@ func TestJWKVector_Ed25519PublicKey(t *testing.T) {
 		t.Fatalf("expected ed25519.PublicKey, got %T", result.Key)
 	}
 
-	expectedX, _ := base64.RawURLEncoding.DecodeString("11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaNcAlUM")
-	if len(pub) != len(expectedX) {
-		t.Fatalf("expected %d bytes, got %d", len(expectedX), len(pub))
+	if len(pub) != ed25519.PublicKeySize {
+		t.Fatalf("expected %d bytes, got %d", ed25519.PublicKeySize, len(pub))
 	}
-	_ = pub
 }
 
 func TestJWKVector_Ed25519PrivateKey(t *testing.T) {
@@ -478,8 +483,8 @@ func TestJWKVector_Ed25519PrivateKey(t *testing.T) {
 		"alg":"EdDSA"
 	}`
 
-	result, err := ParseJWK([]byte(knownJWK))
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal([]byte(knownJWK), &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -506,8 +511,8 @@ func TestJWKVector_ECDSAP256Public(t *testing.T) {
 		"alg":"ES256"
 	}`
 
-	result, err := ParseJWK([]byte(knownJWK))
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal([]byte(knownJWK), &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -538,8 +543,8 @@ func TestJWKVector_ECDSAP256Private(t *testing.T) {
 		"alg":"ES256"
 	}`
 
-	result, err := ParseJWK([]byte(knownJWK))
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal([]byte(knownJWK), &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -563,12 +568,12 @@ func TestJWKVector_RSA(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	jsonData, err := EncodeToJWK(priv, RS256, "test-rsa-kid")
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: RS256, ID: "test-rsa-kid"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := ParseJWK(jsonData)
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -588,11 +593,11 @@ func TestJWKVector_RSA(t *testing.T) {
 	}
 }
 
-// ── EncodeToJWK with kid ────────────────────────────────────
+// ── MarshalJSON with kid ───────────────────────────────────
 
 func TestJWKEncode_WithKID(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	jsonData, err := EncodeToJWK(priv, EdDSA, "my-key-1")
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: EdDSA, ID: "my-key-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -610,7 +615,7 @@ func TestJWKEncode_WithKID(t *testing.T) {
 
 func TestJWKEncode_WithoutKID(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-	jsonData, err := EncodeToJWK(priv, EdDSA, "")
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: EdDSA})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,13 +639,13 @@ func TestJWKRoundTrip_Ed25519EmptyKID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	jsonData, err := EncodeToJWK(priv, EdDSA, "")
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: EdDSA})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := ParseJWK(jsonData)
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
 		t.Fatal(err)
 	}
 	if result.ID != "" {
@@ -650,8 +655,8 @@ func TestJWKRoundTrip_Ed25519EmptyKID(t *testing.T) {
 
 func TestJWKParse_OctWithAlg(t *testing.T) {
 	data := []byte(`{"kty":"oct","k":"Zm9vYmFy","alg":"HS256","kid":"sym-key"}`)
-	result, err := ParseJWK(data)
-	if err != nil {
+	var result JWK
+	if err := json.Unmarshal(data, &result); err != nil {
 		t.Fatal(err)
 	}
 
@@ -688,34 +693,28 @@ func TestJWKSRoundTrip_MixedKeys(t *testing.T) {
 	hmacKey := make([]byte, 32)
 	rand.Read(hmacKey)
 
-	edJWK, err := EncodeToJWK(edPriv, EdDSA, "ed25519-key")
-	if err != nil {
-		t.Fatal(err)
+	var raw struct {
+		Keys []JWK `json:"keys"`
 	}
-	ecJWK, err := EncodeToJWK(ecPriv, ES256, "ecdsa-key")
-	if err != nil {
-		t.Fatal(err)
+	raw.Keys = []JWK{
+		{Key: edPriv, Alg: EdDSA, ID: "ed25519-key"},
+		{Key: ecPriv, Alg: ES256, ID: "ecdsa-key"},
+		{Key: rsaPriv, Alg: RS256, ID: "rsa-key"},
+		{Key: []byte(hmacKey), Alg: HS256, ID: "hmac-key"},
 	}
-	rsaJWK, err := EncodeToJWK(rsaPriv, RS256, "rsa-key")
-	if err != nil {
-		t.Fatal(err)
-	}
-	hmacJWK, err := EncodeToJWK([]byte(hmacKey), HS256, "hmac-key")
+
+	jwksJSON, err := json.Marshal(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	jwksJSON := `{"keys":[` +
-		string(edJWK) + `,` +
-		string(ecJWK) + `,` +
-		string(rsaJWK) + `,` +
-		string(hmacJWK) +
-		`]}`
-
-	keys, err := ParseJWKS([]byte(jwksJSON))
-	if err != nil {
+	var parsed struct {
+		Keys []JWK `json:"keys"`
+	}
+	if err := json.Unmarshal(jwksJSON, &parsed); err != nil {
 		t.Fatal(err)
 	}
+	keys := parsed.Keys
 
 	if len(keys) != 4 {
 		t.Fatalf("expected 4 keys, got %d", len(keys))
@@ -751,12 +750,14 @@ func TestJWKSRoundTrip_MixedKeys(t *testing.T) {
 }
 
 func TestJWKS_EmptySet(t *testing.T) {
-	keys, err := ParseJWKS([]byte(`{"keys":[]}`))
-	if err != nil {
+	var raw struct {
+		Keys []JWK `json:"keys"`
+	}
+	if err := json.Unmarshal([]byte(`{"keys":[]}`), &raw); err != nil {
 		t.Fatal(err)
 	}
-	if len(keys) != 0 {
-		t.Fatalf("expected 0 keys, got %d", len(keys))
+	if len(raw.Keys) != 0 {
+		t.Fatalf("expected 0 keys, got %d", len(raw.Keys))
 	}
 }
 
@@ -765,21 +766,27 @@ func TestJWKS_SingleKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jwkJSON, err := EncodeToJWK(priv, EdDSA, "single")
-	if err != nil {
-		t.Fatal(err)
-	}
-	jwksJSON := `{"keys":[` + string(jwkJSON) + `]}`
 
-	keys, err := ParseJWKS([]byte(jwksJSON))
+	var raw struct {
+		Keys []JWK `json:"keys"`
+	}
+	raw.Keys = []JWK{{Key: priv, Alg: EdDSA, ID: "single"}}
+	jwksJSON, err := json.Marshal(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(keys) != 1 {
-		t.Fatalf("expected 1 key, got %d", len(keys))
+
+	var parsed struct {
+		Keys []JWK `json:"keys"`
 	}
-	if keys[0].ID != "single" {
-		t.Fatalf("expected ID single, got %s", keys[0].ID)
+	if err := json.Unmarshal(jwksJSON, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(parsed.Keys))
+	}
+	if parsed.Keys[0].ID != "single" {
+		t.Fatalf("expected ID single, got %s", parsed.Keys[0].ID)
 	}
 }
 
@@ -793,21 +800,26 @@ func TestJWKS_WithPublicKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	edJWK, err := EncodeToJWK(pub, EdDSA, "")
-	if err != nil {
-		t.Fatal(err)
+	var raw struct {
+		Keys []JWK `json:"keys"`
 	}
-	ecJWK, err := EncodeToJWK(&ecPriv.PublicKey, ES384, "")
+	raw.Keys = []JWK{
+		{Key: pub, Alg: EdDSA},
+		{Key: &ecPriv.PublicKey, Alg: ES384},
+	}
+	jwksJSON, err := json.Marshal(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	jwksJSON := `{"keys":[` + string(edJWK) + `,` + string(ecJWK) + `]}`
-	keys, err := ParseJWKS([]byte(jwksJSON))
-	if err != nil {
+	var parsed struct {
+		Keys []JWK `json:"keys"`
+	}
+	if err := json.Unmarshal(jwksJSON, &parsed); err != nil {
 		t.Fatal(err)
 	}
 
+	keys := parsed.Keys
 	if len(keys) != 2 {
 		t.Fatalf("expected 2 keys, got %d", len(keys))
 	}
@@ -822,23 +834,36 @@ func TestJWKS_WithPublicKeys(t *testing.T) {
 // ── JWKS Error cases ────────────────────────────────────────
 
 func TestJWKSError_BadJSON(t *testing.T) {
-	_, err := ParseJWKS([]byte(`{bad json`))
-	if err != ErrInvalidJWK {
-		t.Fatalf("expected ErrInvalidJWK, got %v", err)
+	var raw struct {
+		Keys []JWK `json:"keys"`
+	}
+	err := json.Unmarshal([]byte(`{bad json`), &raw)
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Fatalf("expected *json.SyntaxError, got %v (%T)", err, err)
 	}
 }
 
 func TestJWKSError_NoKeysField(t *testing.T) {
-	_, err := ParseJWKS([]byte(`{"kty":"RSA"}`))
-	if err != ErrInvalidJWK {
-		t.Fatalf("expected ErrInvalidJWK, got %v", err)
+	var raw struct {
+		Keys []JWK `json:"keys"`
+	}
+	if err := json.Unmarshal([]byte(`{"kty":"RSA"}`), &raw); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(raw.Keys) != 0 {
+		t.Fatalf("expected 0 keys, got %d", len(raw.Keys))
 	}
 }
 
 func TestJWKSError_KeysNotArray(t *testing.T) {
-	_, err := ParseJWKS([]byte(`{"keys":"not-an-array"}`))
-	if err != ErrInvalidJWK {
-		t.Fatalf("expected ErrInvalidJWK, got %v", err)
+	var raw struct {
+		Keys []JWK `json:"keys"`
+	}
+	err := json.Unmarshal([]byte(`{"keys":"not-an-array"}`), &raw)
+	var typeErr *json.UnmarshalTypeError
+	if !errors.As(err, &typeErr) {
+		t.Fatalf("expected *json.UnmarshalTypeError, got %v (%T)", err, err)
 	}
 }
 
@@ -848,7 +873,10 @@ func TestJWKSError_InvalidKeyInSet(t *testing.T) {
 		{"kty":"UNKNOWN"}
 	]}`
 
-	_, err := ParseJWKS([]byte(jwksJSON))
+	var raw struct {
+		Keys []JWK `json:"keys"`
+	}
+	err := json.Unmarshal([]byte(jwksJSON), &raw)
 	if err != ErrUnsupportedKeyType {
 		t.Fatalf("expected ErrUnsupportedKeyType, got %v", err)
 	}
@@ -859,8 +887,35 @@ func TestJWKSError_BadBase64InSet(t *testing.T) {
 		{"kty":"oct","k":"!!!not-base64!!!"}
 	]}`
 
-	_, err := ParseJWKS([]byte(jwksJSON))
+	var raw struct {
+		Keys []JWK `json:"keys"`
+	}
+	err := json.Unmarshal([]byte(jwksJSON), &raw)
 	if err != ErrInvalidJWK {
 		t.Fatalf("expected ErrInvalidJWK, got %v", err)
+	}
+}
+
+func TestJWKEncode_RSAPublicNoDuplicateN(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := &priv.PublicKey
+
+	jsonData, err := json.Marshal(JWK{Key: pub, Alg: RS256})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	count := 0
+	pattern := `"n":"`
+	for i := 0; i <= len(jsonData)-len(pattern); i++ {
+		if string(jsonData[i:i+len(pattern)]) == pattern {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 n field, got %d in %s", count, string(jsonData))
 	}
 }
