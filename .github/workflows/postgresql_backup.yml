@@ -14,7 +14,7 @@ env:
   DOCKER_IMAGE: ghcr.io/skerkour/postgresql-backup
 
 jobs:
-  docker_build_native:
+  docker_build:
     runs-on:  ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
