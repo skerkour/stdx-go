@@ -183,6 +183,10 @@ type Header struct {
 	X5C     []string  `json:"x5c,omitempty"`
 	X5T     string    `json:"x5t,omitempty"`
 	X5TS256 string    `json:"x5t#S256,omitempty"`
+
+	// field populated when parsing header to re-use when validating the token
+	firstDotIndex  int `json:"-"`
+	secondDotIndex int `json:"-"`
 }
 
 // The ClaimsValidator interface is used to avoid multiple unmarshalling when validating registered
@@ -346,13 +350,19 @@ func Sign(keyAny any, header *Header, claims any) (string, error) {
 // ParseHeader extracts and decodes the header from a JWT token without verifying.
 // Use this to inspect the kid field before looking up the verification key.
 func ParseHeader(token string) (Header, error) {
-	dotsCount := strings.Count(token, ".")
-	if dotsCount != 2 {
+	firstDotIndex := strings.IndexByte(token, '.')
+	if firstDotIndex <= 0 {
 		return Header{}, ErrInvalidToken
 	}
 
-	firstDotIndex := strings.IndexByte(token, '.')
-	if firstDotIndex <= 0 {
+	secondDotIndex := strings.IndexByte(token[firstDotIndex+1:], '.')
+	if secondDotIndex <= 0 {
+		return Header{}, ErrInvalidToken
+	}
+	secondDotIndex += firstDotIndex + 1
+
+	extraDotIndex := strings.IndexByte(token[secondDotIndex+1:], '.')
+	if extraDotIndex >= 0 {
 		return Header{}, ErrInvalidToken
 	}
 
@@ -375,6 +385,8 @@ func ParseHeader(token string) (Header, error) {
 		return Header{}, ErrUnsupportedAlgorithm
 	}
 
+	header.firstDotIndex = firstDotIndex
+	header.secondDotIndex = secondDotIndex
 	return header, nil
 }
 
@@ -388,32 +400,22 @@ func ParseHeader(token string) (Header, error) {
 //	*rsa.PublicKey                          -> RS*/PS*
 //	[]byte                                  -> HS*
 func ParseAndVerify[C any](key any, header Header, token string, opts *VerifyOptions) (claims C, err error) {
-	dotsCount := strings.Count(token, ".")
-	if dotsCount != 2 {
+	// ensure that the given header corresponds to the token
+	if header.firstDotIndex == 0 || header.secondDotIndex == 0 || header.firstDotIndex >= header.secondDotIndex ||
+		header.secondDotIndex >= len(token) || token[header.firstDotIndex] != '.' || token[header.secondDotIndex] != '.' {
 		return claims, ErrInvalidToken
 	}
 
-	firstDotIndex := strings.IndexByte(token, '.')
-	if firstDotIndex <= 0 {
-		return claims, ErrInvalidToken
-	}
-
-	secondDotIndex := strings.LastIndexByte(token, '.')
-	if secondDotIndex <= 0 {
-		return claims, ErrInvalidToken
-	}
-
-	claimsBase64 := token[firstDotIndex+1 : secondDotIndex]
-	signatureBase64 := token[secondDotIndex+1:]
-
-	signedMessage := token[:secondDotIndex]
+	claimsBase64 := token[header.firstDotIndex+1 : header.secondDotIndex]
+	signatureBase64 := token[header.secondDotIndex+1:]
+	signedMessage := token[:header.secondDotIndex]
 
 	rawSignature, err := base64.RawURLEncoding.DecodeString(signatureBase64)
 	if err != nil {
 		return claims, ErrInvalidToken
 	}
 
-	if err = verify(key, []byte(signedMessage), rawSignature, header.Alg); err != nil {
+	if err = verify(key, header.Alg, []byte(signedMessage), rawSignature); err != nil {
 		return claims, err
 	}
 
@@ -437,15 +439,17 @@ func ParseAndVerify[C any](key any, header Header, token string, opts *VerifyOpt
 
 		// fast-path for when the input claim is a map[string]any
 		if claimsMap, ok := any(claims).(map[string]any); ok {
-			if err = json.Unmarshal(claimsJSON, &claims); err != nil {
-				return claims, ErrInvalidToken
-			}
 			err = validateClaimsMap(claimsMap, opts)
 			return claims, err
 		}
 
-		// slow-path for custom structures where we need to deserialize a first time into map[string]any
-		err = validateClaims(claimsJSON, opts)
+		// slow-path for custom structures where we need to unmarshal 2 times
+		var registeredClaims RegisteredClaims
+		err = json.Unmarshal(claimsJSON, &registeredClaims)
+		if err != nil {
+			return claims, err
+		}
+		err = registeredClaims.ValidateClaims(opts)
 		return claims, err
 	}
 
@@ -571,7 +575,7 @@ func hashFuncCrypto(alg Algorithm) (crypto.Hash, error) {
 	return 0, ErrInvalidAlgorithm
 }
 
-func verify(keyAny any, message, sig []byte, alg Algorithm) error {
+func verify(keyAny any, alg Algorithm, message, sig []byte) error {
 	switch key := keyAny.(type) {
 	case ed25519.PrivateKey:
 		if alg != EdDSA {

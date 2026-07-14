@@ -392,18 +392,6 @@ func TestParseAndVerify_WrongKey(t *testing.T) {
 	}
 }
 
-func TestParseHeader_InvalidToken(t *testing.T) {
-	_, err := ParseHeader("not-a-jwt")
-	if err != ErrInvalidToken {
-		t.Fatalf("expected ErrInvalidToken, got %v", err)
-	}
-
-	_, err = ParseHeader("only.two.parts")
-	if err == nil {
-		t.Fatal("expected error for two-part token")
-	}
-}
-
 func TestSign_UnsupportedKeyType(t *testing.T) {
 	header := Header{Typ: JWT, Alg: EdDSA}
 	_, err := Sign("not-a-key", &header, map[string]any{})
@@ -426,8 +414,20 @@ func TestSign_WrongAlgorithm(t *testing.T) {
 }
 
 func TestVerify_UnsupportedKeyType(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	header := Header{Typ: JWT, Alg: EdDSA}
-	_, err := ParseAndVerify[any]("not-a-key", header, "a.b.cA", nil)
+	token, err := Sign(priv, &header, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedHeader, err := ParseHeader(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ParseAndVerify[any]("not-a-key", parsedHeader, token, nil)
 	if err != ErrUnsupportedKeyType {
 		t.Fatalf("expected ErrUnsupportedKeyType, got %v", err)
 	}
@@ -1201,5 +1201,105 @@ func TestParseHeader_SupportedAlgorithm(t *testing.T) {
 		if parsed.Alg != alg {
 			t.Fatalf("expected alg %s, got %s", alg, parsed.Alg)
 		}
+	}
+}
+
+// ── Malformed token / edge case tests ───────────────────────
+
+func TestParseHeader_MalformedTokens(t *testing.T) {
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{"empty string", ""},
+		{"single dot", "."},
+		{"only dots", "..."},
+		{"no dots", "noDotsHere"},
+		{"leading dot", ".a.b"},
+		{"two parts only", "a.b"},
+		{"trailing dot after claims", "a.b."},
+		{"trailing double dot after header", "a.."},
+		{"truncated after first dot", "a."},
+		{"empty header", ".b.c"},
+		{"empty claims", "a..c"},
+		{"consecutive dots between header and claims", "ab...c"},
+		{"valid base64, invalid json", "ISEh.YQ.YQ"},
+		{"valid json, missing alg", "eyJ0eXAiOiJKV1QifQ.YQ.YQ"},
+		{"valid json, alg is empty string", "eyJhbGciOiIifQ.YQ.YQ"},
+		{"header base64 not 4-char aligned", "ab.cd.ef"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseHeader(tt.token)
+			if err != ErrInvalidToken {
+				t.Fatalf("expected ErrInvalidToken, got %v", err)
+			}
+		})
+	}
+}
+
+func TestParseHeader_FourParts(t *testing.T) {
+	_, err := ParseHeader("a.b.c.d")
+	if err != ErrInvalidToken {
+		t.Fatalf("expected ErrInvalidToken for extra dot, got %v", err)
+	}
+}
+
+func TestParseHeader_InvalidBase64(t *testing.T) {
+	_, err := ParseHeader("!!!not-base64!!.YQ.YQ")
+	if err != ErrInvalidToken {
+		t.Fatalf("expected ErrInvalidToken for invalid header base64, got %v", err)
+	}
+}
+
+func TestParseAndVerify_MismatchedHeaderToken(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	header := Header{Typ: JWT, Alg: EdDSA}
+	longToken, err := Sign(priv, &header, map[string]any{"sub": "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	longParsed, err := ParseHeader(longToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if longParsed.firstDotIndex <= 0 || longParsed.secondDotIndex <= 0 {
+		t.Fatal("expected non-zero dot indices")
+	}
+
+	// use the long token's header with a shorter token — should not panic
+	_, err = ParseAndVerify[any](priv, longParsed, "X.Y", nil)
+	if err != ErrInvalidToken {
+		t.Fatalf("expected ErrInvalidToken for mismatched header/token, got %v", err)
+	}
+}
+
+func TestParseAndVerify_MismatchedHeaderTokenBoundary(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	header := Header{Typ: JWT, Alg: EdDSA}
+	longToken, err := Sign(priv, &header, map[string]any{"sub": "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	longParsed, err := ParseHeader(longToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	short := longToken[:longParsed.secondDotIndex]
+	_, err = ParseAndVerify[any](priv, longParsed, short, nil)
+	if err != ErrInvalidToken {
+		t.Fatalf("expected ErrInvalidToken when token truncated at secondDotIndex, got %v", err)
 	}
 }
