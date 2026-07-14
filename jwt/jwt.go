@@ -85,6 +85,7 @@ var (
 	ErrInvalidToken         = errors.New("jwt: invalid token format")
 	ErrTokenExpired         = errors.New("jwt: token is expired")
 	ErrTokenNotYetValid     = errors.New("jwt: token is not yet valid")
+	ErrTokenIssuedInFuture  = errors.New("jwt: token was issued in the future")
 	ErrInvalidAudience      = errors.New("jwt: invalid audience")
 	ErrInvalidIssuer        = errors.New("jwt: invalid issuer")
 	ErrKeyIsTooShort        = errors.New("jwt: key is too short")
@@ -232,6 +233,15 @@ func (claims RegisteredClaims) ValidateClaims(opts *VerifyOptions) error {
 		}
 	}
 
+	if opts.Iat {
+		if claims.IAT == 0 {
+			return ErrMissingField
+		}
+		if claims.IAT > now+int64(opts.AllowedTimeDrift.Seconds()) {
+			return ErrTokenIssuedInFuture
+		}
+	}
+
 	if len(opts.Aud) > 0 {
 		if len(claims.AUD) == 0 {
 			return ErrInvalidAudience
@@ -262,9 +272,14 @@ func (claims RegisteredClaims) ValidateClaims(opts *VerifyOptions) error {
 type VerifyOptions struct {
 	AllowedTimeDrift time.Duration
 	Exp              bool
-	Nbf              bool
-	Aud              []string
-	Iss              []string
+	// Not Before verification
+	Nbf bool
+	// Issued At verification
+	Iat bool
+	// Audience verification
+	Aud []string
+	// Issuer verification
+	Iss []string
 }
 
 // Sign creates a signed JWT token string.
@@ -425,7 +440,7 @@ func ParseAndVerify[C any](key any, header Header, token string, opts *VerifyOpt
 	}
 
 	if opts != nil &&
-		(opts.Exp || opts.Nbf || len(opts.Aud) > 0 || len(opts.Iss) > 0) {
+		(opts.Exp || opts.Nbf || opts.Iat || len(opts.Aud) > 0 || len(opts.Iss) > 0) {
 		if err = json.Unmarshal(claimsJSON, &claims); err != nil {
 			return claims, ErrInvalidToken
 		}
@@ -661,6 +676,13 @@ func validateClaimsMap(claims map[string]any, opts *VerifyOptions) error {
 
 	if nbfRaw, ok := claims["nbf"]; ok {
 		registeredClaims.NBF, err = timestampFromJson(nbfRaw)
+		if err != nil {
+			return err
+		}
+	}
+
+	if iatRaw, ok := claims["iat"]; ok {
+		registeredClaims.IAT, err = timestampFromJson(iatRaw)
 		if err != nil {
 			return err
 		}

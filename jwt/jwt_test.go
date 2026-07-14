@@ -884,9 +884,11 @@ func TestParseAndVerify_RegisteredClaimsWithIAT(t *testing.T) {
 	}
 
 	opts := VerifyOptions{
-		Exp: true,
-		Aud: []string{"my-api"},
-		Iss: []string{"my-app"},
+		Exp:              true,
+		Iat:              true,
+		Aud:              []string{"my-api"},
+		Iss:              []string{"my-app"},
+		AllowedTimeDrift: time.Minute,
 	}
 
 	result, err := ParseAndVerify[RegisteredClaims](priv, parsedHeader, token, &opts)
@@ -895,6 +897,114 @@ func TestParseAndVerify_RegisteredClaimsWithIAT(t *testing.T) {
 	}
 	if result.SUB != "user1" {
 		t.Fatalf("expected user1, got %s", result.SUB)
+	}
+}
+
+func TestSignAndVerify_IssuedInFuture(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claims := map[string]any{"iat": time.Now().Add(time.Hour).Unix()}
+
+	header := Header{Typ: JWT, Alg: EdDSA}
+	token, err := Sign(priv, &header, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsedHeader, err := ParseHeader(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := VerifyOptions{Iat: true}
+	_, err = ParseAndVerify[map[string]any](priv, parsedHeader, token, &opts)
+	if err != ErrTokenIssuedInFuture {
+		t.Fatalf("expected ErrTokenIssuedInFuture, got %v", err)
+	}
+}
+
+func TestSignAndVerify_IssuedAtWithDrift(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := VerifyOptions{
+		Iat:              true,
+		AllowedTimeDrift: 10 * time.Second,
+	}
+
+	withinDrift := time.Now().Add(5 * time.Second).Unix()
+
+	claims := map[string]any{"iat": withinDrift}
+	header := Header{Typ: JWT, Alg: EdDSA}
+	token, err := Sign(priv, &header, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsedHeader, err := ParseHeader(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ParseAndVerify[map[string]any](priv, parsedHeader, token, &opts)
+	if err != nil {
+		t.Fatalf("expected token within drift to be valid, got %v", err)
+	}
+}
+
+func TestSignAndVerify_MissingIat(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claims := map[string]any{"sub": "test"}
+
+	header := Header{Typ: JWT, Alg: EdDSA}
+	token, err := Sign(priv, &header, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsedHeader, err := ParseHeader(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := VerifyOptions{Iat: true}
+	_, err = ParseAndVerify[map[string]any](priv, parsedHeader, token, &opts)
+	if err != ErrMissingField {
+		t.Fatalf("expected ErrMissingField for missing iat, got %v", err)
+	}
+}
+
+func TestTimestamp_NonIntegerIat(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claims := map[string]any{"iat": 123456.789}
+	header := Header{Typ: JWT, Alg: EdDSA}
+	token, err := Sign(priv, &header, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsedHeader, err := ParseHeader(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := VerifyOptions{Iat: true}
+	_, err = ParseAndVerify[map[string]any](priv, parsedHeader, token, &opts)
+	if err != ErrMissingField {
+		t.Fatalf("expected ErrMissingField for non-integer iat, got %v", err)
 	}
 }
 
