@@ -80,7 +80,7 @@ var (
 	ErrUnsupportedCurve     = errors.New("jwt: unsupported elliptic curve")
 	ErrInvalidAlgorithm     = errors.New("jwt: invalid algorithm for key type")
 	ErrInvalidJWK           = errors.New("jwt: invalid JWK")
-	ErrMissingField         = errors.New("jwt: missing required JWK field")
+	ErrMissingField         = errors.New("jwt: missing required JWT field")
 	ErrInvalidSignature     = errors.New("jwt: invalid signature")
 	ErrInvalidToken         = errors.New("jwt: invalid token format")
 	ErrTokenExpired         = errors.New("jwt: token is expired")
@@ -185,16 +185,73 @@ type Header struct {
 	X5TS256 string    `json:"x5t#S256,omitempty"`
 }
 
+// The ClaimsValidator interface is used to avoid multiple unmarshalling when validating registered
+// claims.
+type ClaimsValidator interface {
+	ValidateClaims(opts *VerifyOptions) error
+}
+
 // RegisteredClaims holds the standard JWT registered claim names.
 // https://www.rfc-editor.org/rfc/rfc7519#section-4.1
 type RegisteredClaims struct {
-	ISS string `json:"iss,omitempty"`
-	SUB string `json:"sub,omitempty"`
-	AUD string `json:"aud,omitempty"`
-	EXP int64  `json:"exp,omitempty"`
-	NBF int64  `json:"nbf,omitempty"`
-	IAT int64  `json:"iat,omitempty"`
-	JTI string `json:"jti,omitempty"`
+	ISS string   `json:"iss,omitempty"`
+	SUB string   `json:"sub,omitempty"`
+	AUD []string `json:"aud,omitempty"`
+	EXP int64    `json:"exp,omitempty"`
+	NBF int64    `json:"nbf,omitempty"`
+	IAT int64    `json:"iat,omitempty"`
+	JTI string   `json:"jti,omitempty"`
+}
+
+func (claims RegisteredClaims) ValidateClaims(opts *VerifyOptions) error {
+	if opts == nil {
+		return nil
+	}
+
+	now := time.Now().Unix()
+
+	if opts.Exp {
+		if claims.EXP == 0 {
+			return ErrMissingField
+		}
+		if claims.EXP < now-int64(opts.AllowedTimeDrift.Seconds()) {
+			return ErrTokenExpired
+		}
+	}
+
+	if opts.Nbf {
+		if claims.NBF == 0 {
+			return ErrMissingField
+		}
+		if claims.NBF > now+int64(opts.AllowedTimeDrift.Seconds()) {
+			return ErrTokenNotYetValid
+		}
+	}
+
+	if len(opts.Aud) > 0 {
+		if len(claims.AUD) == 0 {
+			return ErrInvalidAudience
+		}
+
+		audFound := false
+		for _, validAud := range opts.Aud {
+			if slices.Contains(claims.AUD, validAud) {
+				audFound = true
+				break
+			}
+		}
+		if !audFound {
+			return ErrInvalidAudience
+		}
+	}
+
+	if len(opts.Iss) > 0 {
+		if claims.ISS == "" || !slices.Contains(opts.Iss, claims.ISS) {
+			return ErrInvalidIssuer
+		}
+	}
+
+	return nil
 }
 
 // VerifyOptions configures claim verification for ParseAndVerify.
@@ -365,27 +422,35 @@ func ParseAndVerify[C any](key any, header Header, token string, opts *VerifyOpt
 		return claims, ErrInvalidToken
 	}
 
-	if opts != nil {
-		hasValidation := opts.Exp || opts.Nbf || len(opts.Aud) > 0 || len(opts.Iss) > 0
-		if hasValidation {
+	if opts != nil &&
+		(opts.Exp || opts.Nbf || len(opts.Aud) > 0 || len(opts.Iss) > 0) {
+		if err = json.Unmarshal(claimsJSON, &claims); err != nil {
+			return claims, ErrInvalidToken
+		}
+
+		// fast-path for when claims implement the ClaimsValidator interface
+		// (e.g. when embedding RegisteredClaims)
+		if claimsValidator, ok := any(claims).(ClaimsValidator); ok {
+			err = claimsValidator.ValidateClaims(opts)
+			return claims, err
+		}
+
+		// fast-path for when the input claim is a map[string]any
+		if claimsMap, ok := any(claims).(map[string]any); ok {
 			if err = json.Unmarshal(claimsJSON, &claims); err != nil {
 				return claims, ErrInvalidToken
 			}
-			if claimsMap, ok := any(claims).(map[string]any); ok {
-				if err = validateClaimsMap(claimsMap, opts); err != nil {
-					return claims, err
-				}
-				return claims, nil
-			}
-			if err = validateClaims(claimsJSON, opts); err != nil {
-				return claims, err
-			}
-			return claims, nil
+			err = validateClaimsMap(claimsMap, opts)
+			return claims, err
 		}
+
+		// slow-path for custom structures where we need to deserialize a first time into map[string]any
+		err = validateClaims(claimsJSON, opts)
+		return claims, err
 	}
 
 	err = json.Unmarshal(claimsJSON, &claims)
-	return
+	return claims, err
 }
 
 // ── signing / verification helpers ──────────────────────────
@@ -570,97 +635,60 @@ func verify(keyAny any, message, sig []byte, alg Algorithm) error {
 	}
 }
 
-func validateClaimsMap(claims map[string]any, opts *VerifyOptions) error {
-	now := time.Now().Unix()
-
-	if opts.Exp {
-		if expRaw, ok := claims["exp"]; ok {
-			exp, err := timestampFromJson(expRaw)
-			if err != nil {
-				return err
-			}
-			if exp < now-int64(opts.AllowedTimeDrift.Seconds()) {
-				return ErrTokenExpired
-			}
-		} else {
-			return ErrMissingField
-		}
-	}
-
-	if opts.Nbf {
-		if nbfRaw, ok := claims["nbf"]; ok {
-			nbf, err := timestampFromJson(nbfRaw)
-			if err != nil {
-				return err
-			}
-			if nbf > now+int64(opts.AllowedTimeDrift.Seconds()) {
-				return ErrTokenNotYetValid
-			}
-		} else {
-			return ErrMissingField
-		}
-	}
-
-	if len(opts.Aud) > 0 {
-		audRaw, ok := claims["aud"]
-		if !ok {
-			return ErrMissingField
-		}
-		switch v := audRaw.(type) {
-		case string:
-			if !slices.Contains(opts.Aud, v) {
-				return ErrInvalidAudience
-			}
-		case []any:
-			found := false
-			for _, a := range v {
-				if s, ok := a.(string); ok && slices.Contains(opts.Aud, s) {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return ErrInvalidAudience
-			}
-		default:
-			return ErrInvalidAudience
-		}
-	}
-
-	if len(opts.Iss) > 0 {
-		issRaw, ok := claims["iss"]
-		if !ok {
-			return ErrMissingField
-		}
-		tokenIss, ok := issRaw.(string)
-		if !ok {
-			return ErrInvalidIssuer
-		}
-
-		if !slices.Contains(opts.Iss, tokenIss) {
-			return ErrInvalidIssuer
-		}
-	}
-
-	return nil
-}
-
 func validateClaims(claimsJSON []byte, opts *VerifyOptions) error {
-	if opts == nil {
-		return nil
-	}
-
-	hasValidation := opts.Exp || opts.Nbf || len(opts.Aud) > 0 || len(opts.Iss) > 0
-	if !hasValidation {
-		return nil
-	}
-
 	raw := make(map[string]any, 4)
 	if err := json.Unmarshal(claimsJSON, &raw); err != nil {
 		return nil
 	}
 
 	return validateClaimsMap(raw, opts)
+}
+
+func validateClaimsMap(claims map[string]any, opts *VerifyOptions) error {
+	var registeredClaims RegisteredClaims
+	var err error
+
+	if expRaw, ok := claims["exp"]; ok {
+		registeredClaims.EXP, err = timestampFromJson(expRaw)
+		if err != nil {
+			return err
+		}
+	}
+
+	if nbfRaw, ok := claims["nbf"]; ok {
+		registeredClaims.NBF, err = timestampFromJson(nbfRaw)
+		if err != nil {
+			return err
+		}
+	}
+
+	if issRaw, ok := claims["iss"]; ok {
+		registeredClaims.ISS, ok = issRaw.(string)
+		if !ok {
+			return ErrInvalidIssuer
+		}
+	}
+
+	if audRaw, ok := claims["aud"]; ok {
+		switch audValue := audRaw.(type) {
+		case []any:
+			audStrings := make([]string, 0, len(audValue))
+			for _, aud := range audValue {
+				if audString, ok := aud.(string); ok {
+					audStrings = append(audStrings, audString)
+				} else {
+					return ErrInvalidAudience
+				}
+			}
+			registeredClaims.AUD = audStrings
+		case string:
+			registeredClaims.AUD = []string{audValue}
+		default:
+			return ErrInvalidAudience
+		}
+	}
+
+	return registeredClaims.ValidateClaims(opts)
 }
 
 func timestampFromJson(v any) (int64, error) {

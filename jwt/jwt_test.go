@@ -226,7 +226,7 @@ func TestSignAndVerify_WithRegisteredClaims(t *testing.T) {
 	claims := RegisteredClaims{
 		SUB: "user1",
 		ISS: "my-app",
-		AUD: "my-api",
+		AUD: []string{"my-api"},
 		EXP: time.Now().Add(time.Hour).Unix(),
 		NBF: time.Now().Add(-time.Minute).Unix(),
 		IAT: time.Now().Unix(),
@@ -867,7 +867,7 @@ func TestParseAndVerify_RegisteredClaimsWithIAT(t *testing.T) {
 	claims := RegisteredClaims{
 		SUB: "user1",
 		ISS: "my-app",
-		AUD: "my-api",
+		AUD: []string{"my-api"},
 		EXP: time.Now().Add(time.Hour).Unix(),
 		IAT: time.Now().Unix(),
 	}
@@ -1100,7 +1100,7 @@ func TestParseAndVerify_RegisteredClaimsWithValidation(t *testing.T) {
 	claims := RegisteredClaims{
 		SUB: "user1",
 		ISS: "my-app",
-		AUD: "my-api",
+		AUD: []string{"my-api"},
 		EXP: time.Now().Add(time.Hour).Unix(),
 	}
 
