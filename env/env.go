@@ -57,10 +57,13 @@ func (d *decoder) decode(v reflect.Value, prefix string, env map[string]string) 
 				}
 				fieldVal = fieldVal.Elem()
 			}
-			if err := d.decode(fieldVal, key+"_", env); err != nil {
-				return err
+			if !reflect.PtrTo(ft).Implements(textUnmarshalerType) &&
+				!reflect.PtrTo(ft).Implements(binaryUnmarshalerType) {
+				if err := d.decode(fieldVal, key+"_", env); err != nil {
+					return err
+				}
+				continue
 			}
-			continue
 		}
 
 		val, ok := env[key]
@@ -92,6 +95,10 @@ func (d *decoder) setField(fieldVal reflect.Value, val string) error {
 
 	if isTextUnmarshaler(fieldVal) {
 		return fieldVal.Addr().Interface().(interface{ UnmarshalText([]byte) error }).UnmarshalText([]byte(val))
+	}
+
+	if isBinaryUnmarshaler(fieldVal) {
+		return fieldVal.Addr().Interface().(interface{ UnmarshalBinary([]byte) error }).UnmarshalBinary([]byte(val))
 	}
 
 	// support for []byte
@@ -132,4 +139,15 @@ func isTextUnmarshaler(v reflect.Value) bool {
 	return reflect.PtrTo(t).Implements(textUnmarshalerType)
 }
 
-var textUnmarshalerType = reflect.TypeOf((*interface{ UnmarshalText([]byte) error })(nil)).Elem()
+var (
+	textUnmarshalerType   = reflect.TypeOf((*interface{ UnmarshalText([]byte) error })(nil)).Elem()
+	binaryUnmarshalerType = reflect.TypeOf((*interface{ UnmarshalBinary([]byte) error })(nil)).Elem()
+)
+
+func isBinaryUnmarshaler(v reflect.Value) bool {
+	t := v.Type()
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return reflect.PtrTo(t).Implements(binaryUnmarshalerType)
+}

@@ -3,6 +3,7 @@ package env
 import (
 	"errors"
 	"net"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -651,5 +652,82 @@ func TestUnmarshalByteSliceWithPrefix(t *testing.T) {
 	want := []byte("test-key")
 	if string(cfg.Key) != string(want) {
 		t.Errorf("expected %q, got %q", want, cfg.Key)
+	}
+}
+
+func TestUnmarshalURL(t *testing.T) {
+	type Config struct {
+		URL url.URL `env:"URL,required"`
+	}
+
+	env := map[string]string{
+		"URL": "postgres://user:pass@localhost:5432/db?sslmode=disable",
+	}
+
+	var cfg Config
+	err := Unmarshal(env, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.URL.Scheme != "postgres" {
+		t.Errorf("expected scheme=postgres, got %q", cfg.URL.Scheme)
+	}
+	if cfg.URL.Host != "localhost:5432" {
+		t.Errorf("expected host=localhost:5432, got %q", cfg.URL.Host)
+	}
+	if cfg.URL.Path != "/db" {
+		t.Errorf("expected path=/db, got %q", cfg.URL.Path)
+	}
+}
+
+func TestUnmarshalURLWithSubnested(t *testing.T) {
+	type Database struct {
+		URL      url.URL `env:"URL,required"`
+		PoolSize uint32  `env:"POOL_SIZE,default=85"`
+	}
+
+	type Config struct {
+		Port     uint16   `env:"PORT,default=443"`
+		Database Database `env:"DATABASE"`
+	}
+
+	env := map[string]string{
+		"DATABASE_URL":       "mysql://user:pass@db.internal:3306/app",
+		"DATABASE_POOL_SIZE": "42",
+	}
+
+	var cfg Config
+	err := Unmarshal(env, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Port != 443 {
+		t.Errorf("expected Port=443 (default), got %d", cfg.Port)
+	}
+	if cfg.Database.URL.Scheme != "mysql" {
+		t.Errorf("expected scheme=mysql, got %q", cfg.Database.URL.Scheme)
+	}
+	if cfg.Database.URL.Host != "db.internal:3306" {
+		t.Errorf("expected host=db.internal:3306, got %q", cfg.Database.URL.Host)
+	}
+	if cfg.Database.URL.Path != "/app" {
+		t.Errorf("expected path=/app, got %q", cfg.Database.URL.Path)
+	}
+	if cfg.Database.PoolSize != 42 {
+		t.Errorf("expected PoolSize=42, got %d", cfg.Database.PoolSize)
+	}
+}
+
+func TestUnmarshalURLMissing(t *testing.T) {
+	type Config struct {
+		URL url.URL `env:"URL,required"`
+	}
+
+	var cfg Config
+	err := Unmarshal(map[string]string{}, &cfg)
+	if err == nil {
+		t.Fatal("expected error for missing URL")
 	}
 }
