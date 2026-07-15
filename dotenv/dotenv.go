@@ -15,6 +15,7 @@ package dotenv
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -206,6 +207,9 @@ func loadFile(filename string, overload bool) error {
 func readFile(filename string) (envMap map[string]string, err error) {
 	file, err := os.Open(filename)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return make(map[string]string), nil
+		}
 		return
 	}
 	defer file.Close()

@@ -47,31 +47,29 @@ func loadEnvAndCompareValues(t *testing.T, loader func(files ...string) error, e
 
 func TestLoadWithNoArgsLoadsDotEnv(t *testing.T) {
 	err := Load()
-	pathError := err.(*os.PathError)
-	if pathError == nil || pathError.Op != "open" || pathError.Path != ".env" {
-		t.Errorf("Didn't try and open .env by default")
+	if err != nil {
+		t.Errorf("Expected no error for missing .env, got %v", err)
 	}
 }
 
 func TestOverloadWithNoArgsOverloadsDotEnv(t *testing.T) {
 	err := Overload()
-	pathError := err.(*os.PathError)
-	if pathError == nil || pathError.Op != "open" || pathError.Path != ".env" {
-		t.Errorf("Didn't try and open .env by default")
+	if err != nil {
+		t.Errorf("Expected no error for missing .env, got %v", err)
 	}
 }
 
 func TestLoadFileNotFound(t *testing.T) {
 	err := Load("somefilethatwillneverexistever.env")
-	if err == nil {
-		t.Error("File wasn't found but Load didn't return an error")
+	if err != nil {
+		t.Error("File wasn't found but Load still returned an error")
 	}
 }
 
 func TestOverloadFileNotFound(t *testing.T) {
 	err := Overload("somefilethatwillneverexistever.env")
-	if err == nil {
-		t.Error("File wasn't found but Overload didn't return an error")
+	if err != nil {
+		t.Error("File wasn't found but Overload still returned an error")
 	}
 }
 
