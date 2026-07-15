@@ -12,7 +12,7 @@ import (
 
 const (
 	KeySize   = 32
-	NonceSize = 24
+	NonceSize = 32
 	TagSize   = 32
 
 	errInvalidBlake3Key = "chacha20blake3: internal error: invalid BLAKE3 key"
