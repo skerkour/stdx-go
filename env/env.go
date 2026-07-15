@@ -3,7 +3,9 @@ package env
 import (
 	"encoding/base64"
 	"fmt"
+	"os"
 	"reflect"
+	"strings"
 )
 
 func Unmarshal(env map[string]string, dst any) error {
@@ -18,6 +20,19 @@ func UnmarshalWithPrefix(prefix string, env map[string]string, dst any) error {
 	v = v.Elem()
 	d := &decoder{cache: newCache()}
 	return d.decode(v, prefix, env)
+}
+
+// Load reads all environment variables from the process into a map.
+func Load() map[string]string {
+	env := make(map[string]string)
+	for _, entry := range os.Environ() {
+		k, v, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		env[k] = v
+	}
+	return env
 }
 
 type decoder struct {

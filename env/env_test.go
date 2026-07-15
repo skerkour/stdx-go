@@ -2,8 +2,10 @@ package env
 
 import (
 	"errors"
+	"log/slog"
 	"net"
 	"net/url"
+	"os"
 	"testing"
 	"time"
 )
@@ -729,5 +731,110 @@ func TestUnmarshalURLMissing(t *testing.T) {
 	err := Unmarshal(map[string]string{}, &cfg)
 	if err == nil {
 		t.Fatal("expected error for missing URL")
+	}
+}
+
+func TestUnmarshalSlogLevelNested(t *testing.T) {
+	type Logs struct {
+		Level slog.Level `env:"LEVEL,default=info"`
+	}
+
+	type Config struct {
+		Port uint16 `env:"PORT,default=443"`
+		Logs Logs   `env:"LOG"`
+	}
+
+	env := map[string]string{
+		"LOG_LEVEL": "debug",
+	}
+
+	var cfg Config
+	err := Unmarshal(env, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Port != 443 {
+		t.Errorf("expected Port=443 (default), got %d", cfg.Port)
+	}
+	if cfg.Logs.Level != slog.LevelDebug {
+		t.Errorf("expected LevelDebug(-4), got %d", cfg.Logs.Level)
+	}
+}
+
+func TestUnmarshalSlogLevelDefault(t *testing.T) {
+	type Logs struct {
+		Level slog.Level `env:"LEVEL,default=info"`
+	}
+
+	type Config struct {
+		Logs Logs `env:"LOG"`
+	}
+
+	env := map[string]string{
+		"LOG_LEVEL": "debug",
+	}
+
+	var cfg Config
+	err := Unmarshal(env, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Logs.Level != slog.LevelDebug {
+		t.Errorf("expected LevelDebug(-4), got %d", cfg.Logs.Level)
+	}
+}
+
+func TestUnmarshalSlogLevelDefaultFallback(t *testing.T) {
+	type Logs struct {
+		Level slog.Level `env:"LEVEL,default=info"`
+	}
+
+	type Config struct {
+		Logs Logs `env:"LOG"`
+	}
+
+	var cfg Config
+	err := Unmarshal(map[string]string{}, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Logs.Level != slog.LevelInfo {
+		t.Errorf("expected LevelInfo(0), got %d", cfg.Logs.Level)
+	}
+}
+
+func TestLoad(t *testing.T) {
+	os.Setenv("_TEST_ENV_KEY", "test_value")
+	defer os.Unsetenv("_TEST_ENV_KEY")
+
+	env := Load()
+	if env["_TEST_ENV_KEY"] != "test_value" {
+		t.Errorf("expected _TEST_ENV_KEY=test_value, got %q", env["_TEST_ENV_KEY"])
+	}
+}
+
+func TestLoadThenUnmarshal(t *testing.T) {
+	os.Setenv("_TEST_HOST", "example.com")
+	os.Setenv("_TEST_PORT", "9090")
+	defer os.Unsetenv("_TEST_HOST")
+	defer os.Unsetenv("_TEST_PORT")
+
+	type Config struct {
+		Host string `env:"_TEST_HOST"`
+		Port int    `env:"_TEST_PORT"`
+	}
+
+	env := Load()
+	var cfg Config
+	err := Unmarshal(env, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Host != "example.com" {
+		t.Errorf("expected Host=example.com, got %q", cfg.Host)
+	}
+	if cfg.Port != 9090 {
+		t.Errorf("expected Port=9090, got %d", cfg.Port)
 	}
 }
