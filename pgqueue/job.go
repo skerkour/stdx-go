@@ -70,30 +70,29 @@ type NewJobInput struct {
 	Timeout *int32
 }
 
-func (status JobStatus) MarshalText() (ret []byte, err error) {
+func (status JobStatus) String() string {
 	switch status {
 	case JobStatusQueued:
-		ret = []byte("queued")
+		return "queued"
 	case JobStatusRunning:
-		ret = []byte("running")
+		return "running"
 	case JobStatusFailed:
-		ret = []byte("failed")
+		return "failed"
 	default:
-		err = ErrJobSatusIsNotValid(strconv.Itoa(int(status)))
-		return nil, err
+		return strconv.Itoa(int(status))
 	}
-
-	return ret, nil
 }
 
-func (status JobStatus) String() string {
-	ret, _ := status.MarshalText()
-	return string(ret)
+func (status JobStatus) MarshalJSON() ([]byte, error) {
+	return json.Marshal(status.String())
 }
 
-// UnmarshalText implements encoding.TextUnmarshaler.
-func (status *JobStatus) UnmarshalText(data []byte) (err error) {
-	switch string(data) {
+func (status *JobStatus) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	switch s {
 	case "queued":
 		*status = JobStatusQueued
 	case "running":
@@ -101,10 +100,8 @@ func (status *JobStatus) UnmarshalText(data []byte) (err error) {
 	case "failed":
 		*status = JobStatusFailed
 	default:
-		err = ErrJobSatusIsNotValid(string(data))
-		return err
+		return ErrJobSatusIsNotValid(s)
 	}
-
 	return nil
 }
 
