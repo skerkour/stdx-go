@@ -65,7 +65,7 @@ type NewJobInput struct {
 	// default: Constant
 	RetryStrategy RetryStrategy
 
-	// Timeout in seconds. Allows range: 1-7200
+	// Timeout in seconds. Allowed range: 1-7200
 	// default: 60
 	Timeout *int32
 }

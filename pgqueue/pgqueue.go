@@ -70,6 +70,7 @@ var (
 
 type PostgreSQLQueue struct {
 	pool   *pgxpool.Pool
+	table  string
 	logger *slog.Logger
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -78,7 +79,7 @@ type PostgreSQLQueue struct {
 // ensure that PostgreSQLQueue satisfies the Queue interface
 var _ Queue = (*PostgreSQLQueue)(nil)
 
-func New(pool *pgxpool.Pool, logger *slog.Logger) *PostgreSQLQueue {
+func New(pool *pgxpool.Pool, table string, logger *slog.Logger) *PostgreSQLQueue {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -86,6 +87,7 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *PostgreSQLQueue {
 	ctx, cancel := context.WithCancel(context.Background())
 	queue := &PostgreSQLQueue{
 		pool:   pool,
+		table:  table,
 		logger: logger,
 		ctx:    ctx,
 		cancel: cancel,
@@ -94,6 +96,54 @@ func New(pool *pgxpool.Pool, logger *slog.Logger) *PostgreSQLQueue {
 	go queue.failTimedOutJobsLoop()
 
 	return queue
+}
+
+func (queue *PostgreSQLQueue) CreateTable(ctx context.Context) error {
+	tableName := pgx.Identifier{queue.table}.Sanitize()
+
+	tx, err := queue.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("pgqueue: beginning transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+		id UUID PRIMARY KEY,
+		created_at TIMESTAMPTZ NOT NULL,
+		updated_at TIMESTAMPTZ NOT NULL,
+		scheduled_for TIMESTAMPTZ NOT NULL,
+		failed_attempts INTEGER NOT NULL DEFAULT 0,
+		status INTEGER NOT NULL,
+		type TEXT NOT NULL,
+		data JSONB NOT NULL,
+		retry_max INTEGER NOT NULL,
+		retry_delay INTEGER NOT NULL,
+		retry_strategy INTEGER NOT NULL,
+		timeout INTEGER NOT NULL
+	)`, tableName))
+	if err != nil {
+		return fmt.Errorf("pgqueue: creating table: %w", err)
+	}
+
+	_, err = tx.Exec(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (status, scheduled_for)`,
+		pgx.Identifier{"index_" + queue.table + "on_status_scheduled_for"}.Sanitize(), tableName))
+	if err != nil {
+		return fmt.Errorf("pgqueue: creating status_scheduled_for index: %w", err)
+	}
+
+	_, err = tx.Exec(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (status, updated_at)`,
+		pgx.Identifier{"index_" + queue.table + "on_status_updated_at"}.Sanitize(), tableName))
+	if err != nil {
+		return fmt.Errorf("pgqueue: creating status_updated_at index: %w", err)
+	}
+
+	_, err = tx.Exec(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (status, created_at DESC)`,
+		pgx.Identifier{"index_" + queue.table + "on_status_created_at"}.Sanitize(), tableName))
+	if err != nil {
+		return fmt.Errorf("pgqueue: creating status_created_at index: %w", err)
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (queue *PostgreSQLQueue) Stop() {
@@ -118,8 +168,9 @@ func (queue *PostgreSQLQueue) failTimedOutJobsLoop() {
 
 func (q *PostgreSQLQueue) failTimedOutJobs(ctx context.Context) {
 	now := time.Now().UTC()
+	tableName := pgx.Identifier{q.table}.Sanitize()
 
-	query := `UPDATE queue
+	query := fmt.Sprintf(`UPDATE %s
 	SET
 		status = CASE
 			WHEN failed_attempts + 1 >= retry_max THEN $1
@@ -132,7 +183,7 @@ func (q *PostgreSQLQueue) failTimedOutJobs(ctx context.Context) {
 			ELSE $3 + (retry_delay * CASE WHEN retry_strategy = $5 THEN failed_attempts + 1 ELSE 1 END) * INTERVAL '1 second'
 		END
 	WHERE status = $4
-	  AND updated_at + (timeout * INTERVAL '1 second') < $3`
+	  AND updated_at + (timeout * INTERVAL '1 second') < $3`, tableName)
 
 	result, err := q.pool.Exec(ctx, query,
 		JobStatusFailed, JobStatusQueued, now, JobStatusRunning, RetryStrategyExponential)
@@ -161,7 +212,7 @@ func validateJob(now time.Time, newJob NewJobInput) (Job, error) {
 		return Job{}, ErrJobTypeIsNotValid
 	}
 
-	rawData, err := json.Marshal(newJob.Data)
+	dataJson, err := json.Marshal(newJob.Data)
 	if err != nil {
 		return Job{}, fmt.Errorf("pgqueue: marshalling job data: %w", err)
 	}
@@ -206,7 +257,7 @@ func validateJob(now time.Time, newJob NewJobInput) (Job, error) {
 		FailedAttempts: 0,
 		Status:         JobStatusQueued,
 		Type:           jobType,
-		DataJson:       rawData,
+		DataJson:       dataJson,
 		RetryMax:       retryMax,
 		RetryDelay:     retryDelay,
 		RetryStrategy:  retryStrategy,
