@@ -4,10 +4,13 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -917,5 +920,284 @@ func TestJWKEncode_RSAPublicNoDuplicateN(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected exactly 1 n field, got %d in %s", count, string(jsonData))
+	}
+}
+
+// ── AKP / ML-DSA JWK tests ─────────────────────────────────
+
+func TestJWKRoundTrip_MLDSA44PublicKey(t *testing.T) {
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA44())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := priv.PublicKey()
+
+	jsonData, err := json.Marshal(JWK{Key: pub, Alg: MLDSA44, ID: "mldsa44-pub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if result.Alg != MLDSA44 {
+		t.Fatalf("expected Alg ML-DSA-44, got %s", result.Alg)
+	}
+	if result.ID != "mldsa44-pub" {
+		t.Fatalf("expected kid mldsa44-pub, got %s", result.ID)
+	}
+
+	parsed, ok := result.Key.(*mldsa.PublicKey)
+	if !ok {
+		t.Fatalf("expected *mldsa.PublicKey, got %T", result.Key)
+	}
+	if !pub.Equal(parsed) {
+		t.Fatal("public keys not equal")
+	}
+}
+
+func TestJWKRoundTrip_MLDSA44PrivateKey(t *testing.T) {
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA44())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: MLDSA44, ID: "mldsa44-priv"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if result.Alg != MLDSA44 {
+		t.Fatalf("expected Alg ML-DSA-44, got %s", result.Alg)
+	}
+	if result.ID != "mldsa44-priv" {
+		t.Fatalf("expected kid mldsa44-priv, got %s", result.ID)
+	}
+
+	parsed, ok := result.Key.(*mldsa.PrivateKey)
+	if !ok {
+		t.Fatalf("expected *mldsa.PrivateKey, got %T", result.Key)
+	}
+	if !priv.Equal(parsed) {
+		t.Fatal("private keys not equal")
+	}
+}
+
+func TestJWKRoundTrip_MLDSA65PrivateKey(t *testing.T) {
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA65())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: MLDSA65})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if result.Alg != MLDSA65 {
+		t.Fatalf("expected Alg ML-DSA-65, got %s", result.Alg)
+	}
+}
+
+func TestJWKRoundTrip_MLDSA87PrivateKey(t *testing.T) {
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA87())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: MLDSA87})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if result.Alg != MLDSA87 {
+		t.Fatalf("expected Alg ML-DSA-87, got %s", result.Alg)
+	}
+}
+
+func TestJWKRoundTrip_MLDSA44AllZeroSeed(t *testing.T) {
+	// RFC 9964, Appendix A.1, Figure 1: all-zeros seed ML-DSA-44 key
+	seed := make([]byte, 32)
+	priv, err := mldsa.NewPrivateKey(mldsa.MLDSA44(), seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := priv.PublicKey()
+
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: MLDSA44})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Check the JWK has the expected structure
+	var raw struct {
+		KTY  string `json:"kty"`
+		ALG  string `json:"alg"`
+		PUB  string `json:"pub"`
+		PRIV string `json:"priv"`
+	}
+	if err := json.Unmarshal(jsonData, &raw); err != nil {
+		t.Fatal(err)
+	}
+
+	if raw.KTY != "AKP" {
+		t.Fatalf("expected kty AKP, got %s", raw.KTY)
+	}
+	if raw.ALG != "ML-DSA-44" {
+		t.Fatalf("expected alg ML-DSA-44, got %s", raw.ALG)
+	}
+	if raw.PRIV != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" {
+		t.Fatalf("unexpected priv encoding: %s", raw.PRIV)
+	}
+
+	// Round-trip verify
+	var result JWK
+	if err := json.Unmarshal(jsonData, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	parsedPriv, ok := result.Key.(*mldsa.PrivateKey)
+	if !ok {
+		t.Fatalf("expected *mldsa.PrivateKey, got %T", result.Key)
+	}
+	if !priv.Equal(parsedPriv) {
+		t.Fatal("private keys not equal")
+	}
+	if !pub.Equal(parsedPriv.PublicKey()) {
+		t.Fatal("public keys not equal")
+	}
+}
+
+func TestJWK_MarshalMLDSA_PrivateKey(t *testing.T) {
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA44())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jsonData, err := json.Marshal(JWK{Key: priv, Alg: MLDSA44, ID: "mldsa-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var raw struct {
+		KTY  string `json:"kty"`
+		ALG  string `json:"alg"`
+		KID  string `json:"kid"`
+		PUB  string `json:"pub"`
+		PRIV string `json:"priv"`
+	}
+	if err := json.Unmarshal(jsonData, &raw); err != nil {
+		t.Fatal(err)
+	}
+
+	if raw.KTY != "AKP" {
+		t.Fatalf("expected kty AKP, got %s", raw.KTY)
+	}
+	if raw.ALG != "ML-DSA-44" {
+		t.Fatalf("expected alg ML-DSA-44, got %s", raw.ALG)
+	}
+	if raw.KID != "mldsa-key" {
+		t.Fatalf("expected kid mldsa-key, got %s", raw.KID)
+	}
+	if raw.PUB == "" {
+		t.Fatal("expected non-empty pub")
+	}
+	if raw.PRIV == "" {
+		t.Fatal("expected non-empty priv")
+	}
+}
+
+func TestJWKError_AKPBadAlg(t *testing.T) {
+	var jwk JWK
+	err := json.Unmarshal([]byte(`{"kty":"AKP","alg":"EdDSA","pub":"AAAA"}`), &jwk)
+	if err != ErrInvalidAlgorithm {
+		t.Fatalf("expected ErrInvalidAlgorithm, got %v", err)
+	}
+}
+
+func TestJWKError_AKPBadPubBase64(t *testing.T) {
+	var jwk JWK
+	err := json.Unmarshal([]byte(`{"kty":"AKP","alg":"ML-DSA-44","pub":"!!!not-base64!!!"}`), &jwk)
+	if err != ErrInvalidJWK {
+		t.Fatalf("expected ErrInvalidJWK, got %v", err)
+	}
+}
+
+func TestJWKError_AKPBadPrivBase64(t *testing.T) {
+	var jwk JWK
+	err := json.Unmarshal([]byte(`{"kty":"AKP","alg":"ML-DSA-44","pub":"AA","priv":"!!!not-base64!!!"}`), &jwk)
+	if err != ErrInvalidJWK {
+		t.Fatalf("expected ErrInvalidJWK, got %v", err)
+	}
+}
+
+func TestJWKError_AKPPrivWrongSize(t *testing.T) {
+	// Wrong size seed (16 bytes instead of 32)
+	seed := make([]byte, 16)
+	privBase64 := base64.RawURLEncoding.EncodeToString(seed)
+	pub, err := mldsa.GenerateKey(mldsa.MLDSA44())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubBase64 := base64.RawURLEncoding.EncodeToString(pub.PublicKey().Bytes())
+	jwkJSON := fmt.Sprintf(`{"kty":"AKP","alg":"ML-DSA-44","pub":"%s","priv":"%s"}`, pubBase64, privBase64)
+	var jwk JWK
+	err = json.Unmarshal([]byte(jwkJSON), &jwk)
+	if err != ErrInvalidJWK {
+		t.Fatalf("expected ErrInvalidJWK for wrong seed size, got %v", err)
+	}
+}
+
+func TestJWKSError_AKPInSet(t *testing.T) {
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA44())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var raw struct {
+		Keys []JWK `json:"keys"`
+	}
+	raw.Keys = []JWK{
+		{Key: priv, Alg: MLDSA44, ID: "mldsa-in-set"},
+		{Key: priv.PublicKey(), Alg: MLDSA44, ID: "mldsa-pub-in-set"},
+	}
+
+	jwksJSON, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var parsed struct {
+		Keys []JWK `json:"keys"`
+	}
+	if err := json.Unmarshal(jwksJSON, &parsed); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(parsed.Keys) != 2 {
+		t.Fatalf("expected 2 keys, got %d", len(parsed.Keys))
+	}
+	if parsed.Keys[0].Alg != MLDSA44 {
+		t.Fatalf("expected ML-DSA-44, got %s", parsed.Keys[0].Alg)
+	}
+	if parsed.Keys[1].Alg != MLDSA44 {
+		t.Fatalf("expected ML-DSA-44, got %s", parsed.Keys[1].Alg)
 	}
 }

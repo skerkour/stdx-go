@@ -62,6 +62,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/hmac"
+	"crypto/mldsa"
 	cryptoRand "crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -134,6 +135,11 @@ const (
 
 	// RSASSA-PSS with SHA-512.
 	PS512 Algorithm = "PS512"
+
+	// ML-DSA (Module-Lattice-Based Digital Signature Standard, FIPS 204).
+	MLDSA44 Algorithm = "ML-DSA-44"
+	MLDSA65 Algorithm = "ML-DSA-65"
+	MLDSA87 Algorithm = "ML-DSA-87"
 )
 
 func (a Algorithm) isHMAC() bool {
@@ -160,9 +166,17 @@ func (a Algorithm) isECDSA() bool {
 	return false
 }
 
+func (a Algorithm) isMLDSA() bool {
+	switch a {
+	case MLDSA44, MLDSA65, MLDSA87:
+		return true
+	}
+	return false
+}
+
 func (a Algorithm) isSupported() bool {
 	switch a {
-	case HS256, HS384, HS512, EdDSA, ES256, ES384, ES512, RS256, RS384, RS512, PS256, PS384, PS512:
+	case HS256, HS384, HS512, EdDSA, ES256, ES384, ES512, RS256, RS384, RS512, PS256, PS384, PS512, MLDSA44, MLDSA65, MLDSA87:
 		return true
 	}
 	return false
@@ -352,6 +366,15 @@ func Sign(keyAny any, header *Header, claims any) (string, error) {
 			return "", err
 		}
 		signature = sig
+
+	case *mldsa.PrivateKey:
+		if !header.Alg.isMLDSA() {
+			return "", ErrInvalidAlgorithm
+		}
+		signature, err = key.SignDeterministic(buf, &mldsa.Options{})
+		if err != nil {
+			return "", err
+		}
 
 	default:
 		return "", ErrUnsupportedKeyType
@@ -641,6 +664,24 @@ func verify(keyAny any, alg Algorithm, message, sig []byte) error {
 			return ErrInvalidAlgorithm
 		}
 		return rsaVerify(&key.PublicKey, message, sig, alg)
+
+	case *mldsa.PrivateKey:
+		if !alg.isMLDSA() {
+			return ErrInvalidAlgorithm
+		}
+		if err := mldsa.Verify(key.PublicKey(), message, sig, &mldsa.Options{}); err != nil {
+			return ErrInvalidSignature
+		}
+		return nil
+
+	case *mldsa.PublicKey:
+		if !alg.isMLDSA() {
+			return ErrInvalidAlgorithm
+		}
+		if err := mldsa.Verify(key, message, sig, &mldsa.Options{}); err != nil {
+			return ErrInvalidSignature
+		}
+		return nil
 
 	case []byte:
 		if !alg.isHMAC() {

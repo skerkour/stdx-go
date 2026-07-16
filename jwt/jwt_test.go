@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
@@ -1265,7 +1266,7 @@ func TestVerify_RSAPrivateKeyWrongAlgorithm(t *testing.T) {
 }
 
 func TestIsSupported(t *testing.T) {
-	all := []Algorithm{HS256, HS384, HS512, EdDSA, ES256, ES384, ES512, RS256, RS384, RS512, PS256, PS384, PS512}
+	all := []Algorithm{HS256, HS384, HS512, EdDSA, ES256, ES384, ES512, RS256, RS384, RS512, PS256, PS384, PS512, MLDSA44, MLDSA65, MLDSA87}
 	for _, a := range all {
 		if !a.isSupported() {
 			t.Fatalf("expected %s to be supported", a)
@@ -1411,5 +1412,194 @@ func TestParseAndVerify_MismatchedHeaderTokenBoundary(t *testing.T) {
 	_, err = ParseAndVerify[any](priv, longParsed, short, nil)
 	if err != ErrInvalidToken {
 		t.Fatalf("expected ErrInvalidToken when token truncated at secondDotIndex, got %v", err)
+	}
+}
+
+// ── ML-DSA tests ────────────────────────────────────────────
+
+func TestSignAndVerify_MLDSA44(t *testing.T) {
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA44())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := priv.PublicKey()
+
+	header := Header{Typ: JWT, Alg: MLDSA44, KID: "mldsa44-key"}
+	claims := map[string]any{"sub": "user123"}
+
+	token, err := Sign(priv, &header, claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsedHeader, err := ParseHeader(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsedHeader.Alg != MLDSA44 {
+		t.Fatalf("expected MLDSA44, got %s", parsedHeader.Alg)
+	}
+	if parsedHeader.KID != "mldsa44-key" {
+		t.Fatalf("expected mldsa44-key, got %s", parsedHeader.KID)
+	}
+
+	result, err := ParseAndVerify[map[string]any](pub, parsedHeader, token, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["sub"] != "user123" {
+		t.Fatalf("expected user123, got %v", result["sub"])
+	}
+}
+
+func TestSignAndVerify_MLDSA65(t *testing.T) {
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA65())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := priv.PublicKey()
+
+	header := Header{Typ: JWT, Alg: MLDSA65}
+	token, err := Sign(priv, &header, map[string]any{"sub": "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsedHeader, err := ParseHeader(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ParseAndVerify[map[string]any](pub, parsedHeader, token, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSignAndVerify_MLDSA87(t *testing.T) {
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA87())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := priv.PublicKey()
+
+	header := Header{Typ: JWT, Alg: MLDSA87}
+	token, err := Sign(priv, &header, map[string]any{"sub": "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsedHeader, err := ParseHeader(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ParseAndVerify[map[string]any](pub, parsedHeader, token, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSignAndVerify_MLDSA_VerifyWithPrivateKey(t *testing.T) {
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA44())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	header := Header{Typ: JWT, Alg: MLDSA44}
+	token, err := Sign(priv, &header, map[string]any{"sub": "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsedHeader, err := ParseHeader(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify using the private key (should extract the public key)
+	_, err = ParseAndVerify[map[string]any](priv, parsedHeader, token, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSign_MLDSA_WrongAlgorithm(t *testing.T) {
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA44())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	header := Header{Typ: JWT, Alg: EdDSA}
+	_, err = Sign(priv, &header, map[string]any{})
+	if err != ErrInvalidAlgorithm {
+		t.Fatalf("expected ErrInvalidAlgorithm, got %v", err)
+	}
+}
+
+func TestVerify_MLDSA_WrongAlgorithm(t *testing.T) {
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA44())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := priv.PublicKey()
+
+	header := Header{Typ: JWT, Alg: MLDSA44}
+	token, err := Sign(priv, &header, map[string]any{"sub": "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsedHeader, err := ParseHeader(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsedHeader.Alg = EdDSA
+	_, err = ParseAndVerify[map[string]any](pub, parsedHeader, token, nil)
+	if err != ErrInvalidAlgorithm {
+		t.Fatalf("expected ErrInvalidAlgorithm, got %v", err)
+	}
+}
+
+func TestVerify_MLDSA_WrongKey(t *testing.T) {
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA44())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongPriv, err := mldsa.GenerateKey(mldsa.MLDSA44())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	header := Header{Typ: JWT, Alg: MLDSA44}
+	token, err := Sign(priv, &header, map[string]any{"sub": "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsedHeader, err := ParseHeader(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ParseAndVerify[map[string]any](wrongPriv.PublicKey(), parsedHeader, token, nil)
+	if err != ErrInvalidSignature {
+		t.Fatalf("expected ErrInvalidSignature, got %v", err)
+	}
+}
+
+func TestParseHeader_MLDSA_Supported(t *testing.T) {
+	for _, alg := range []Algorithm{MLDSA44, MLDSA65, MLDSA87} {
+		header := fmt.Sprintf(`{"alg":"%s","typ":"JWT"}`, alg)
+		headerB64 := base64.RawURLEncoding.EncodeToString([]byte(header))
+		token := headerB64 + ".aW52YWxpZFBheWxvYWQ.aW52YWxpZFNpZ25hdHVyZQ"
+		parsed, err := ParseHeader(token)
+		if err != nil {
+			t.Fatalf("expected no error for %s, got %v", alg, err)
+		}
+		if parsed.Alg != alg {
+			t.Fatalf("expected alg %s, got %s", alg, parsed.Alg)
+		}
 	}
 }

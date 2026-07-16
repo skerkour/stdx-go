@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/binary"
@@ -25,28 +26,37 @@ type JWKS struct {
 }
 
 type jwkFields struct {
-	KTY string `json:"kty"`
-	USE string `json:"use,omitempty"`
-	CRV string `json:"crv,omitempty"`
-	ALG string `json:"alg,omitempty"`
-	KID string `json:"kid,omitempty"`
-	X   string `json:"x,omitempty"`
-	Y   string `json:"y,omitempty"`
-	D   string `json:"d,omitempty"`
-	N   string `json:"n,omitempty"`
-	E   string `json:"e,omitempty"`
-	P   string `json:"p,omitempty"`
-	Q   string `json:"q,omitempty"`
-	DP  string `json:"dp,omitempty"`
-	DQ  string `json:"dq,omitempty"`
-	QI  string `json:"qi,omitempty"`
-	K   string `json:"k,omitempty"`
+	KTY  string `json:"kty"`
+	USE  string `json:"use,omitempty"`
+	CRV  string `json:"crv,omitempty"`
+	ALG  string `json:"alg,omitempty"`
+	KID  string `json:"kid,omitempty"`
+	X    string `json:"x,omitempty"`
+	Y    string `json:"y,omitempty"`
+	D    string `json:"d,omitempty"`
+	N    string `json:"n,omitempty"`
+	E    string `json:"e,omitempty"`
+	P    string `json:"p,omitempty"`
+	Q    string `json:"q,omitempty"`
+	DP   string `json:"dp,omitempty"`
+	DQ   string `json:"dq,omitempty"`
+	QI   string `json:"qi,omitempty"`
+	K    string `json:"k,omitempty"`
+	PUB  string `json:"pub,omitempty"`
+	PRIV string `json:"priv,omitempty"`
 }
 
 // MarshalJSON implements json.Marshaler for JWK.
 // It serializes the key to RFC 7517 JSON.
 func (jwk JWK) MarshalJSON() ([]byte, error) {
-	w := newJwkWriter(280) // good without re-allocation for up to ES384 JWKs
+	capacity := 1600 // appropriate size for ML-DSA-44 keys
+	switch key := jwk.Key.(type) {
+	case *mldsa.PublicKey:
+		capacity = key.Parameters().PublicKeySize() * 4 / 3
+	case *mldsa.PrivateKey:
+		capacity = key.PublicKey().Parameters().PublicKeySize() * 4 / 3
+	}
+	w := newJwkWriter(capacity)
 	w.writeByte('{')
 
 	switch key := jwk.Key.(type) {
@@ -124,6 +134,20 @@ func (jwk JWK) MarshalJSON() ([]byte, error) {
 		w.writeString("alg", string(jwk.Alg))
 		w.writeBase64("n", key.N.Bytes())
 		w.writeIntBase64("e", uint32(key.E))
+
+	case *mldsa.PublicKey:
+		alg := mldsaAlgFromParams(key.Parameters())
+		w.writeString("kty", "AKP")
+		w.writeString("alg", string(alg))
+		w.writeBase64("pub", key.Bytes())
+
+	case *mldsa.PrivateKey:
+		publicKey := key.PublicKey()
+		alg := mldsaAlgFromParams(publicKey.Parameters())
+		w.writeString("kty", "AKP")
+		w.writeString("alg", string(alg))
+		w.writeBase64("pub", publicKey.Bytes())
+		w.writeBase64("priv", key.Bytes())
 
 	case []byte:
 		if !jwk.Alg.isHMAC() {
@@ -342,6 +366,39 @@ func parseJWK(raw *jwkFields) (JWK, error) {
 			ID:  raw.KID,
 		}, nil
 
+	case "AKP":
+		alg := Algorithm(raw.ALG)
+		params, err := mldsaParamsFromAlg(alg)
+		if err != nil {
+			return JWK{}, err
+		}
+
+		pubBytes, err := base64.RawURLEncoding.DecodeString(raw.PUB)
+		if err != nil {
+			return JWK{}, ErrInvalidJWK
+		}
+		publicKey, err := mldsa.NewPublicKey(params, pubBytes)
+		if err != nil {
+			return JWK{}, ErrInvalidJWK
+		}
+
+		if raw.PRIV != "" {
+			seed, err := base64.RawURLEncoding.DecodeString(raw.PRIV)
+			if err != nil || len(seed) != mldsa.PrivateKeySize {
+				return JWK{}, ErrInvalidJWK
+			}
+			sk, err := mldsa.NewPrivateKey(params, seed)
+			if err != nil {
+				return JWK{}, ErrInvalidJWK
+			}
+			if !publicKey.Equal(sk.PublicKey()) {
+				return JWK{}, ErrInvalidJWK
+			}
+			return JWK{Key: sk, Alg: alg, ID: raw.KID}, nil
+		}
+
+		return JWK{Key: publicKey, Alg: alg, ID: raw.KID}, nil
+
 	default:
 		return JWK{}, ErrUnsupportedKeyType
 	}
@@ -433,5 +490,32 @@ func curveInfo(curve elliptic.Curve) (crv string, alg Algorithm, coordLen int, e
 		return "P-521", ES512, 66, nil
 	default:
 		return "", "", 0, ErrUnsupportedCurve
+	}
+}
+
+func mldsaParamsFromAlg(alg Algorithm) (params mldsa.Parameters, err error) {
+	switch alg {
+	case MLDSA44:
+		params = mldsa.MLDSA44()
+	case MLDSA65:
+		params = mldsa.MLDSA65()
+	case MLDSA87:
+		params = mldsa.MLDSA87()
+	default:
+		err = ErrInvalidAlgorithm
+	}
+	return
+}
+
+func mldsaAlgFromParams(params mldsa.Parameters) Algorithm {
+	switch params.PublicKeySize() {
+	case mldsa.MLDSA44PublicKeySize:
+		return MLDSA44
+	case mldsa.MLDSA65PublicKeySize:
+		return MLDSA65
+	case mldsa.MLDSA87PublicKeySize:
+		return MLDSA87
+	default:
+		return ""
 	}
 }
