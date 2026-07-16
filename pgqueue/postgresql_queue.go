@@ -17,11 +17,12 @@ func (queue *PostgreSQLQueue) Push(ctx context.Context, querier Querier, newJob 
 		return err
 	}
 
-	tableName := pgx.Identifier{queue.table}.Sanitize()
-	_, err = querier.Exec(ctx, fmt.Sprintf(`INSERT INTO %s
-		(id, created_at, updated_at, scheduled_for, failed_attempts, status, type, data, retry_max, retry_delay, retry_strategy, timeout)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`, tableName),
-		job.ID, job.CreatedAt, job.UpdatedAt, job.ScheduledFor, job.FailedAttempts,
+	query := fmt.Sprintf(`INSERT INTO %s
+		(id, created_at, updated_at, scheduled_for, deadline_at, failed_attempts, status, type, data, retry_max, retry_delay, retry_strategy, timeout)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, pgx.Identifier{queue.table}.Sanitize())
+
+	_, err = querier.Exec(ctx, query,
+		job.ID, job.CreatedAt, job.UpdatedAt, job.ScheduledFor, job.DeadlineAt, job.FailedAttempts,
 		job.Status, job.Type, job.DataJson, job.RetryMax, job.RetryDelay,
 		job.RetryStrategy, job.Timeout)
 	if err != nil {
@@ -45,7 +46,7 @@ func (queue *PostgreSQLQueue) PushMany(ctx context.Context, querier Querier, new
 			return fmt.Errorf("pgqueue: validating job %d: %w", i, err)
 		}
 		rows[i] = []any{
-			job.ID, job.CreatedAt, job.UpdatedAt, job.ScheduledFor, job.FailedAttempts, job.Status,
+			job.ID, job.CreatedAt, job.UpdatedAt, job.ScheduledFor, job.DeadlineAt, job.FailedAttempts, job.Status,
 			job.Type, job.DataJson, job.RetryMax, job.RetryDelay, job.RetryStrategy, job.Timeout,
 		}
 	}
@@ -53,7 +54,7 @@ func (queue *PostgreSQLQueue) PushMany(ctx context.Context, querier Querier, new
 	_, err := querier.CopyFrom(ctx,
 		pgx.Identifier{queue.table},
 		[]string{
-			"id", "created_at", "updated_at", "scheduled_for", "failed_attempts", "status",
+			"id", "created_at", "updated_at", "scheduled_for", "deadline_at", "failed_attempts", "status",
 			"type", "data", "retry_max", "retry_delay", "retry_strategy", "timeout",
 		},
 		pgx.CopyFromRows(rows),
@@ -65,16 +66,16 @@ func (queue *PostgreSQLQueue) PushMany(ctx context.Context, querier Querier, new
 	return nil
 }
 
-func (q *PostgreSQLQueue) Pull(ctx context.Context, numberOfJobs uint64) ([]Job, error) {
+func (queue *PostgreSQLQueue) Pull(ctx context.Context, numberOfJobs uint64) ([]Job, error) {
 	now := time.Now().UTC()
-	tableName := pgx.Identifier{q.table}.Sanitize()
+	tableName := pgx.Identifier{queue.table}.Sanitize()
 	query := fmt.Sprintf(`UPDATE %s
-	SET status = $1, updated_at = $2
+	SET status = $1, updated_at = $2, deadline_at = $2 + (timeout * INTERVAL '1 second')
 	WHERE id IN (
 		SELECT id
 		FROM %s
 		WHERE status = $3 AND scheduled_for <= $4 AND failed_attempts <= %s.retry_max
-		ORDER BY scheduled_for
+		ORDER BY scheduled_for, id
 		FOR UPDATE SKIP LOCKED
 		LIMIT $5
 	)
@@ -91,7 +92,7 @@ func (q *PostgreSQLQueue) Pull(ctx context.Context, numberOfJobs uint64) ([]Job,
 		case <-pollingTimer.C:
 		}
 
-		rows, err := q.pool.Query(ctx, query,
+		rows, err := queue.pool.Query(ctx, query,
 			JobStatusRunning, now, JobStatusQueued, now, int64(numberOfJobs))
 		if err != nil {
 			return nil, fmt.Errorf("pgqueue: pulling jobs: %w", err)
@@ -112,19 +113,19 @@ func (q *PostgreSQLQueue) Pull(ctx context.Context, numberOfJobs uint64) ([]Job,
 }
 
 func (queue *PostgreSQLQueue) DeleteJob(ctx context.Context, jobID uuid.UUID) error {
-	_, err := queue.pool.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = $1",
-		pgx.Identifier{queue.table}.Sanitize()), jobID)
+	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", pgx.Identifier{queue.table}.Sanitize())
+
+	_, err := queue.pool.Exec(ctx, query, jobID)
 	if err != nil {
 		return fmt.Errorf("pgqueue: deleting job: %w", err)
 	}
 	return nil
 }
 
-func (q *PostgreSQLQueue) FailJob(ctx context.Context, jobID uuid.UUID) error {
+func (queue *PostgreSQLQueue) FailJob(ctx context.Context, jobID uuid.UUID) error {
 	now := time.Now().UTC()
-	tableName := pgx.Identifier{q.table}.Sanitize()
 
-	_, err := q.pool.Exec(ctx, fmt.Sprintf(`UPDATE %s
+	query := fmt.Sprintf(`UPDATE %s
 	SET
 		status = CASE
 			WHEN failed_attempts + 1 >= retry_max THEN $1::integer
@@ -136,8 +137,9 @@ func (q *PostgreSQLQueue) FailJob(ctx context.Context, jobID uuid.UUID) error {
 			WHEN failed_attempts + 1 >= retry_max THEN scheduled_for
 			ELSE $3 + (retry_delay * CASE WHEN retry_strategy = $4::integer THEN failed_attempts + 1 ELSE 1 END) * INTERVAL '1 second'
 		END
-	WHERE id = $5`, tableName),
-		JobStatusFailed, JobStatusQueued, now, RetryStrategyExponential, jobID)
+	WHERE id = $5`, pgx.Identifier{queue.table}.Sanitize())
+
+	_, err := queue.pool.Exec(ctx, query, JobStatusFailed, JobStatusQueued, now, RetryStrategyExponential, jobID)
 	if err != nil {
 		return fmt.Errorf("pgqueue: failing job: %w", err)
 	}
@@ -145,17 +147,19 @@ func (q *PostgreSQLQueue) FailJob(ctx context.Context, jobID uuid.UUID) error {
 }
 
 func (queue *PostgreSQLQueue) Clear(ctx context.Context) error {
-	_, err := queue.pool.Exec(ctx, fmt.Sprintf("DELETE FROM %s",
-		pgx.Identifier{queue.table}.Sanitize()))
+	query := fmt.Sprintf("TRUNCATE %s", pgx.Identifier{queue.table}.Sanitize())
+
+	_, err := queue.pool.Exec(ctx, query)
 	if err != nil {
 		return fmt.Errorf("pgqueue: clearing queue: %w", err)
 	}
 	return nil
 }
 
-func (q *PostgreSQLQueue) GetJob(ctx context.Context, jobID uuid.UUID) (Job, error) {
-	rows, err := q.pool.Query(ctx, fmt.Sprintf("SELECT * FROM %s WHERE id = $1",
-		pgx.Identifier{q.table}.Sanitize()), jobID)
+func (queue *PostgreSQLQueue) GetJob(ctx context.Context, jobID uuid.UUID) (Job, error) {
+	query := fmt.Sprintf("SELECT * FROM %s WHERE id = $1", pgx.Identifier{queue.table}.Sanitize())
+
+	rows, err := queue.pool.Query(ctx, query, jobID)
 	if err != nil {
 		return Job{}, fmt.Errorf("pgqueue: getting job: %w", err)
 	}
@@ -163,10 +167,10 @@ func (q *PostgreSQLQueue) GetJob(ctx context.Context, jobID uuid.UUID) (Job, err
 	return pgx.CollectExactlyOneRow(rows, pgx.RowToStructByName[Job])
 }
 
-func (q *PostgreSQLQueue) GetFailedJobs(ctx context.Context, limit int64) ([]Job, error) {
-	rows, err := q.pool.Query(ctx, fmt.Sprintf(`SELECT * FROM %s WHERE status = $1 ORDER BY created_at DESC LIMIT $2`,
-		pgx.Identifier{q.table}.Sanitize()),
-		JobStatusFailed, limit)
+func (queue *PostgreSQLQueue) GetFailedJobs(ctx context.Context, limit int64) ([]Job, error) {
+	query := fmt.Sprintf(`SELECT * FROM %s WHERE status = $1 ORDER BY created_at DESC LIMIT $2`, pgx.Identifier{queue.table}.Sanitize())
+
+	rows, err := queue.pool.Query(ctx, query, JobStatusFailed, limit)
 	if err != nil {
 		return nil, fmt.Errorf("pgqueue: querying failed jobs: %w", err)
 	}

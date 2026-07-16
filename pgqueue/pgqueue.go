@@ -112,6 +112,7 @@ func (queue *PostgreSQLQueue) CreateTable(ctx context.Context) error {
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		scheduled_for TIMESTAMPTZ NOT NULL,
+		deadline_at TIMESTAMPTZ NOT NULL,
 		failed_attempts INTEGER NOT NULL,
 		status INTEGER NOT NULL,
 		type TEXT NOT NULL,
@@ -125,22 +126,22 @@ func (queue *PostgreSQLQueue) CreateTable(ctx context.Context) error {
 		return fmt.Errorf("pgqueue: creating table: %w", err)
 	}
 
-	_, err = tx.Exec(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (status, scheduled_for)`,
-		pgx.Identifier{"index_" + queue.table + "on_status_scheduled_for"}.Sanitize(), tableName))
+	_, err = tx.Exec(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (scheduled_for) WHERE status = 0`, // JobStatusQueued
+		pgx.Identifier{"index_" + queue.table + "_on_scheduled_for_queued"}.Sanitize(), tableName))
 	if err != nil {
-		return fmt.Errorf("pgqueue: creating status_scheduled_for index: %w", err)
+		return fmt.Errorf("pgqueue: creating scheduled_for_queued index: %w", err)
 	}
 
-	_, err = tx.Exec(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (status, updated_at)`,
-		pgx.Identifier{"index_" + queue.table + "on_status_updated_at"}.Sanitize(), tableName))
+	_, err = tx.Exec(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (deadline_at) WHERE status = 1`, // JobStatusRunning
+		pgx.Identifier{"index_" + queue.table + "_on_deadline_at_running"}.Sanitize(), tableName))
 	if err != nil {
-		return fmt.Errorf("pgqueue: creating status_updated_at index: %w", err)
+		return fmt.Errorf("pgqueue: creating deadline_at_running index: %w", err)
 	}
 
-	_, err = tx.Exec(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (status, created_at DESC)`,
-		pgx.Identifier{"index_" + queue.table + "on_status_created_at"}.Sanitize(), tableName))
+	_, err = tx.Exec(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s ON %s (created_at DESC) WHERE status = 2`, // JobStatusFailed
+		pgx.Identifier{"index_" + queue.table + "_on_created_at_failed"}.Sanitize(), tableName))
 	if err != nil {
-		return fmt.Errorf("pgqueue: creating status_created_at index: %w", err)
+		return fmt.Errorf("pgqueue: creating created_at_failed index: %w", err)
 	}
 
 	return tx.Commit(ctx)
@@ -166,9 +167,9 @@ func (queue *PostgreSQLQueue) failTimedOutJobsLoop() {
 	}
 }
 
-func (q *PostgreSQLQueue) failTimedOutJobs(ctx context.Context) {
+func (queue *PostgreSQLQueue) failTimedOutJobs(ctx context.Context) {
 	now := time.Now().UTC()
-	tableName := pgx.Identifier{q.table}.Sanitize()
+	tableName := pgx.Identifier{queue.table}.Sanitize()
 
 	query := fmt.Sprintf(`UPDATE %s
 	SET
@@ -183,17 +184,17 @@ func (q *PostgreSQLQueue) failTimedOutJobs(ctx context.Context) {
 			ELSE $3 + (retry_delay * CASE WHEN retry_strategy = $5::integer THEN failed_attempts + 1 ELSE 1 END) * INTERVAL '1 second'
 		END
 	WHERE status = $4::integer
-	  AND updated_at + (timeout * INTERVAL '1 second') < $3`, tableName)
+	  AND deadline_at < $3`, tableName)
 
-	result, err := q.pool.Exec(ctx, query,
+	result, err := queue.pool.Exec(ctx, query,
 		JobStatusFailed, JobStatusQueued, now, JobStatusRunning, RetryStrategyExponential)
 	if err != nil {
-		q.logger.Error("pgqueue: timing out jobs", slog.String("error", err.Error()))
+		queue.logger.Error("pgqueue: timing out jobs", slog.String("error", err.Error()))
 		return
 	}
 
 	if n := result.RowsAffected(); n > 0 {
-		q.logger.Info("pgqueue: timed out jobs", slog.Int64("count", n))
+		queue.logger.Info("pgqueue: timed out jobs", slog.Int64("count", n))
 	}
 }
 
@@ -254,6 +255,7 @@ func validateJob(now time.Time, newJob NewJobInput) (Job, error) {
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		ScheduledFor:   scheduledFor,
+		DeadlineAt:     now,
 		FailedAttempts: 0,
 		Status:         JobStatusQueued,
 		Type:           jobType,

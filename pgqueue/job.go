@@ -26,8 +26,10 @@ type Job struct {
 	RetryDelay    int32         `db:"retry_delay" json:"retry_delay"`
 	RetryStrategy RetryStrategy `db:"retry_strategy" json:"retry_strategy"`
 	// Time allowed for the job to complete before being re-queued or marked as failed, in seconds
+	// Time allowed for the job to complete before being re-queued or marked as failed, in seconds. Only relevant when status = 1 (running).
 	Timeout int32 `db:"timeout" json:"timeout"`
-	// priority: i64,
+	// DeadlineAt is computed at Pull time as now + (timeout * 1s). Only relevant when status = 1 (running). Enables efficient timeout scans.
+	DeadlineAt time.Time `db:"deadline_at" json:"deadline_at"`
 }
 
 type NewJobInput struct {
