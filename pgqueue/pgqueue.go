@@ -186,7 +186,7 @@ func (q *PostgreSQLQueue) failTimedOutJobs(ctx context.Context) {
 	  AND updated_at + (timeout * INTERVAL '1 second') < $3`, tableName)
 
 	result, err := q.pool.Exec(ctx, query,
-		JobStatusFailed, JobStatusQueued, now, JobStatusRunning, RetryStrategyExponential)
+		int32(JobStatusFailed), int32(JobStatusQueued), now, int32(JobStatusRunning), int32(RetryStrategyExponential))
 	if err != nil {
 		q.logger.Error("pgqueue: timing out jobs", slog.String("error", err.Error()))
 		return
