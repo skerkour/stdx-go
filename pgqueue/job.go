@@ -8,21 +8,6 @@ import (
 	"github.com/skerkour/stdx-go/uuid"
 )
 
-type JobStatus int32
-
-const (
-	JobStatusQueued JobStatus = iota
-	JobStatusRunning
-	JobStatusFailed
-)
-
-type RetryStrategy int32
-
-const (
-	RetryStrategyConstant RetryStrategy = iota
-	RetryStrategyExponential
-)
-
 type JobData interface {
 	JobType() string
 }
@@ -70,6 +55,14 @@ type NewJobInput struct {
 	Timeout *int32
 }
 
+type JobStatus int32
+
+const (
+	JobStatusQueued JobStatus = iota
+	JobStatusRunning
+	JobStatusFailed
+)
+
 func (status JobStatus) String() string {
 	switch status {
 	case JobStatusQueued:
@@ -88,11 +81,12 @@ func (status JobStatus) MarshalJSON() ([]byte, error) {
 }
 
 func (status *JobStatus) UnmarshalJSON(data []byte) error {
-	var s string
-	if err := json.Unmarshal(data, &s); err != nil {
+	var dataStr string
+	if err := json.Unmarshal(data, &dataStr); err != nil {
 		return err
 	}
-	switch s {
+
+	switch dataStr {
 	case "queued":
 		*status = JobStatusQueued
 	case "running":
@@ -100,40 +94,46 @@ func (status *JobStatus) UnmarshalJSON(data []byte) error {
 	case "failed":
 		*status = JobStatusFailed
 	default:
-		return ErrJobSatusIsNotValid(s)
+		return ErrJobSatusIsNotValid(dataStr)
 	}
+
 	return nil
 }
 
-func (strategy RetryStrategy) MarshalText() (ret []byte, err error) {
-	switch strategy {
-	case RetryStrategyConstant:
-		ret = []byte("constant")
-	case RetryStrategyExponential:
-		ret = []byte("exponential")
-	default:
-		err = ErrRetryStrategyIsNotValid(strconv.Itoa(int(strategy)))
-		return nil, err
-	}
+type RetryStrategy int32
 
-	return ret, nil
-}
+const (
+	RetryStrategyConstant RetryStrategy = iota
+	RetryStrategyExponential
+)
 
 func (strategy RetryStrategy) String() string {
-	ret, _ := strategy.MarshalText()
-	return string(ret)
+	switch strategy {
+	case RetryStrategyConstant:
+		return "constant"
+	case RetryStrategyExponential:
+		return "exponential"
+	default:
+		return strconv.Itoa(int(strategy))
+	}
 }
 
-// UnmarshalText implements encoding.TextUnmarshaler.
-func (strategy *RetryStrategy) UnmarshalText(data []byte) (err error) {
-	switch string(data) {
+func (strategy RetryStrategy) MarshalJSON() ([]byte, error) {
+	return json.Marshal(strategy.String())
+}
+
+func (strategy *RetryStrategy) UnmarshalJSON(data []byte) error {
+	var dataStr string
+	if err := json.Unmarshal(data, &dataStr); err != nil {
+		return err
+	}
+	switch dataStr {
 	case "constant":
 		*strategy = RetryStrategyConstant
 	case "exponential":
 		*strategy = RetryStrategyExponential
 	default:
-		err = ErrRetryStrategyIsNotValid(string(data))
-		return err
+		return ErrRetryStrategyIsNotValid(string(data))
 	}
 
 	return nil

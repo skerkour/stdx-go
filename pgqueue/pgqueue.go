@@ -112,7 +112,7 @@ func (queue *PostgreSQLQueue) CreateTable(ctx context.Context) error {
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		scheduled_for TIMESTAMPTZ NOT NULL,
-		failed_attempts INTEGER NOT NULL DEFAULT 0,
+		failed_attempts INTEGER NOT NULL,
 		status INTEGER NOT NULL,
 		type TEXT NOT NULL,
 		data JSONB NOT NULL,
@@ -173,16 +173,16 @@ func (q *PostgreSQLQueue) failTimedOutJobs(ctx context.Context) {
 	query := fmt.Sprintf(`UPDATE %s
 	SET
 		status = CASE
-			WHEN failed_attempts + 1 >= retry_max THEN $1
-			ELSE $2
+			WHEN failed_attempts + 1 >= retry_max THEN $1::integer
+			ELSE $2::integer
 		END,
 		updated_at = $3,
 		failed_attempts = failed_attempts + 1,
 		scheduled_for = CASE
 			WHEN failed_attempts + 1 >= retry_max THEN scheduled_for
-			ELSE $3 + (retry_delay * CASE WHEN retry_strategy = $5 THEN failed_attempts + 1 ELSE 1 END) * INTERVAL '1 second'
+			ELSE $3 + (retry_delay * CASE WHEN retry_strategy = $5::integer THEN failed_attempts + 1 ELSE 1 END) * INTERVAL '1 second'
 		END
-	WHERE status = $4
+	WHERE status = $4::integer
 	  AND updated_at + (timeout * INTERVAL '1 second') < $3`, tableName)
 
 	result, err := q.pool.Exec(ctx, query,

@@ -127,14 +127,14 @@ func (q *PostgreSQLQueue) FailJob(ctx context.Context, jobID uuid.UUID) error {
 	_, err := q.pool.Exec(ctx, fmt.Sprintf(`UPDATE %s
 	SET
 		status = CASE
-			WHEN failed_attempts + 1 >= retry_max THEN $1
-			ELSE $2
+			WHEN failed_attempts + 1 >= retry_max THEN $1::integer
+			ELSE $2::integer
 		END,
 		updated_at = $3,
 		failed_attempts = failed_attempts + 1,
 		scheduled_for = CASE
 			WHEN failed_attempts + 1 >= retry_max THEN scheduled_for
-			ELSE $3 + (retry_delay * CASE WHEN retry_strategy = $4 THEN failed_attempts + 1 ELSE 1 END) * INTERVAL '1 second'
+			ELSE $3 + (retry_delay * CASE WHEN retry_strategy = $4::integer THEN failed_attempts + 1 ELSE 1 END) * INTERVAL '1 second'
 		END
 	WHERE id = $5`, tableName),
 		JobStatusFailed, JobStatusQueued, now, RetryStrategyExponential, jobID)
