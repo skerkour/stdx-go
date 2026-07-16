@@ -18,8 +18,7 @@ func UnmarshalWithPrefix(prefix string, env map[string]string, dst any) error {
 		return fmt.Errorf("env: destination must be a pointer to a struct")
 	}
 	v = v.Elem()
-	d := &decoder{cache: newCache()}
-	return d.decode(v, prefix, env)
+	return decode(v, prefix, env)
 }
 
 // Load reads all environment variables from the process into a map.
@@ -35,12 +34,9 @@ func Load() map[string]string {
 	return env
 }
 
-type decoder struct {
-	cache *cache
-}
-
-func (d *decoder) decode(v reflect.Value, prefix string, env map[string]string) error {
+func decode(v reflect.Value, prefix string, env map[string]string) error {
 	t := v.Type()
+	infos := sharedCache.structFields(t)
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
 		fieldVal := v.Field(i)
@@ -49,7 +45,7 @@ func (d *decoder) decode(v reflect.Value, prefix string, env map[string]string) 
 			continue
 		}
 
-		info := d.cache.fieldInfo(field)
+		info := infos[i]
 		if info.ignore {
 			continue
 		}
@@ -68,13 +64,16 @@ func (d *decoder) decode(v reflect.Value, prefix string, env map[string]string) 
 		if ft.Kind() == reflect.Struct && !isBuiltinStruct(field.Type) {
 			if field.Type.Kind() == reflect.Ptr {
 				if fieldVal.IsNil() {
+					if !hasMatchingPrefix(env, key+"_") && !sharedCache.hasDefaults(field.Type) {
+						continue
+					}
 					fieldVal.Set(reflect.New(ft))
 				}
 				fieldVal = fieldVal.Elem()
 			}
 			if !reflect.PtrTo(ft).Implements(textUnmarshalerType) &&
 				!reflect.PtrTo(ft).Implements(binaryUnmarshalerType) {
-				if err := d.decode(fieldVal, key+"_", env); err != nil {
+				if err := decode(fieldVal, key+"_", env); err != nil {
 					return err
 				}
 				continue
@@ -93,14 +92,14 @@ func (d *decoder) decode(v reflect.Value, prefix string, env map[string]string) 
 			continue
 		}
 
-		if err := d.setField(fieldVal, val); err != nil {
+		if err := setField(fieldVal, val); err != nil {
 			return fmt.Errorf("env: %s: %w", key, err)
 		}
 	}
 	return nil
 }
 
-func (d *decoder) setField(fieldVal reflect.Value, val string) error {
+func setField(fieldVal reflect.Value, val string) error {
 	if fieldVal.Kind() == reflect.Ptr {
 		if fieldVal.IsNil() {
 			fieldVal.Set(reflect.New(fieldVal.Type().Elem()))
@@ -130,7 +129,7 @@ func (d *decoder) setField(fieldVal reflect.Value, val string) error {
 		return setSlice(fieldVal, val)
 	}
 
-	conv := d.cache.converter(fieldVal.Type())
+	conv := sharedCache.converter(fieldVal.Type())
 	if conv != nil {
 		converted, err := conv(val)
 		if err != nil {
@@ -165,4 +164,13 @@ func isBinaryUnmarshaler(v reflect.Value) bool {
 		t = t.Elem()
 	}
 	return reflect.PtrTo(t).Implements(binaryUnmarshalerType)
+}
+
+func hasMatchingPrefix(env map[string]string, prefix string) bool {
+	for key := range env {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
 }

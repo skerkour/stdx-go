@@ -15,21 +15,21 @@ type fieldInfo struct {
 }
 
 type cache struct {
-	mu     sync.RWMutex
-	fields map[reflect.Type][]fieldInfo
-	conv   map[reflect.Type]converter
+	mu      sync.RWMutex
+	fields  map[reflect.Type][]fieldInfo
+	conv    map[reflect.Type]converter
+	hasDefs map[reflect.Type]bool
+}
+
+var sharedCache = &cache{
+	fields:  make(map[reflect.Type][]fieldInfo),
+	conv:    make(map[reflect.Type]converter),
+	hasDefs: make(map[reflect.Type]bool),
 }
 
 type converter func(string) (reflect.Value, error)
 
-func newCache() *cache {
-	return &cache{
-		fields: make(map[reflect.Type][]fieldInfo),
-		conv:   make(map[reflect.Type]converter),
-	}
-}
-
-func (c *cache) fieldInfo(field reflect.StructField) fieldInfo {
+func parseFieldInfo(field reflect.StructField) fieldInfo {
 	info := fieldInfo{key: field.Name}
 
 	tag, ok := field.Tag.Lookup("env")
@@ -56,6 +56,29 @@ func (c *cache) fieldInfo(field reflect.StructField) fieldInfo {
 	}
 
 	return info
+}
+
+func (c *cache) structFields(t reflect.Type) []fieldInfo {
+	c.mu.RLock()
+	infos, ok := c.fields[t]
+	c.mu.RUnlock()
+	if ok {
+		return infos
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if infos, ok := c.fields[t]; ok {
+		return infos
+	}
+
+	infos = make([]fieldInfo, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		infos[i] = parseFieldInfo(t.Field(i))
+	}
+	c.fields[t] = infos
+	return infos
 }
 
 func (c *cache) converter(t reflect.Type) converter {
@@ -98,13 +121,13 @@ func builtinConverter(t reflect.Type) converter {
 			}
 		}
 	case reflect.Int:
-		return intConverter[int](64, 0)
+		return intConverter[int](64)
 	case reflect.Int8:
-		return intConverter[int8](64, 8)
+		return intConverter[int8](64)
 	case reflect.Int16:
-		return intConverter[int16](64, 16)
+		return intConverter[int16](64)
 	case reflect.Int32:
-		return intConverter[int32](64, 32)
+		return intConverter[int32](64)
 	case reflect.Int64:
 		if t == durationType {
 			return func(v string) (reflect.Value, error) {
@@ -115,17 +138,17 @@ func builtinConverter(t reflect.Type) converter {
 				return reflect.ValueOf(d), nil
 			}
 		}
-		return intConverter[int64](64, 64)
+		return intConverter[int64](64)
 	case reflect.Uint:
-		return uintConverter[uint](64, 0)
+		return uintConverter[uint](64)
 	case reflect.Uint8:
-		return uintConverter[uint8](64, 8)
+		return uintConverter[uint8](64)
 	case reflect.Uint16:
-		return uintConverter[uint16](64, 16)
+		return uintConverter[uint16](64)
 	case reflect.Uint32:
-		return uintConverter[uint32](64, 32)
+		return uintConverter[uint32](64)
 	case reflect.Uint64:
-		return uintConverter[uint64](64, 64)
+		return uintConverter[uint64](64)
 	case reflect.Float32:
 		return floatConverter[float32](32)
 	case reflect.Float64:
@@ -147,7 +170,7 @@ func (e *strconvErr) Error() string {
 	return "cannot parse " + e.val + " as " + e.typ.String()
 }
 
-func intConverter[T intVal](bitSize int, convSize int) converter {
+func intConverter[T intVal](bitSize int) converter {
 	return func(v string) (reflect.Value, error) {
 		n, err := parseInt(v, bitSize)
 		if err != nil {
@@ -157,7 +180,7 @@ func intConverter[T intVal](bitSize int, convSize int) converter {
 	}
 }
 
-func uintConverter[T uintVal](bitSize int, convSize int) converter {
+func uintConverter[T uintVal](bitSize int) converter {
 	return func(v string) (reflect.Value, error) {
 		n, err := parseUint(v, bitSize)
 		if err != nil {
@@ -196,4 +219,66 @@ func isBuiltinStruct(t reflect.Type) bool {
 		t = t.Elem()
 	}
 	return t == durationType
+}
+
+func (c *cache) hasDefaults(t reflect.Type) bool {
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return false
+	}
+	if isBuiltinStruct(t) {
+		return false
+	}
+
+	c.mu.RLock()
+	result, ok := c.hasDefs[t]
+	c.mu.RUnlock()
+	if ok {
+		return result
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if result, ok := c.hasDefs[t]; ok {
+		return result
+	}
+
+	result = c.scanDefaults(t)
+	c.hasDefs[t] = result
+	return result
+}
+
+func (c *cache) scanDefaults(t reflect.Type) bool {
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+
+		tag := field.Tag.Get("env")
+		if tag != "" && tag != "-" {
+			parts := strings.Split(tag, ",")
+			for _, part := range parts[1:] {
+				if strings.HasPrefix(strings.TrimSpace(part), "default=") {
+					return true
+				}
+			}
+		}
+
+		ft := field.Type
+		if ft.Kind() == reflect.Ptr {
+			ft = ft.Elem()
+		}
+		if ft.Kind() == reflect.Struct && !isBuiltinStruct(ft) &&
+			!reflect.PtrTo(ft).Implements(textUnmarshalerType) &&
+			!reflect.PtrTo(ft).Implements(binaryUnmarshalerType) {
+			if c.scanDefaults(ft) {
+				return true
+			}
+		}
+	}
+	return false
 }

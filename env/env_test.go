@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"testing"
@@ -267,6 +268,241 @@ func TestUnmarshalPtrField(t *testing.T) {
 	}
 	if cfg.Port == nil || *cfg.Port != 8080 {
 		t.Errorf("expected Port=8080, got %d", *cfg.Port)
+	}
+}
+
+type PtrStructConfig struct {
+	Provider *ProviderConfig `env:"PROVIDER"`
+}
+
+type ProviderConfig struct {
+	ApiKey string `env:"API_KEY"`
+	Region string `env:"REGION"`
+}
+
+func TestUnmarshalPtrStructNestedNil(t *testing.T) {
+	var cfg PtrStructConfig
+	err := Unmarshal(map[string]string{}, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != nil {
+		t.Errorf("expected Provider to be nil when no env vars match")
+	}
+}
+
+func TestUnmarshalPtrStructNestedSet(t *testing.T) {
+	env := map[string]string{
+		"PROVIDER_API_KEY": "sk-abc123",
+	}
+
+	var cfg PtrStructConfig
+	err := Unmarshal(env, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider == nil {
+		t.Fatal("expected Provider to be non-nil when env var matches")
+	}
+	if cfg.Provider.ApiKey != "sk-abc123" {
+		t.Errorf("expected ApiKey=sk-abc123, got %q", cfg.Provider.ApiKey)
+	}
+	if cfg.Provider.Region != "" {
+		t.Errorf("expected Region=\"\", got %q", cfg.Provider.Region)
+	}
+}
+
+func TestUnmarshalPtrStructNestedSetMultiple(t *testing.T) {
+	env := map[string]string{
+		"PROVIDER_API_KEY": "sk-abc123",
+		"PROVIDER_REGION":  "us-east-1",
+	}
+
+	var cfg PtrStructConfig
+	err := Unmarshal(env, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider == nil {
+		t.Fatal("expected Provider to be non-nil")
+	}
+	if cfg.Provider.ApiKey != "sk-abc123" {
+		t.Errorf("expected ApiKey=sk-abc123, got %q", cfg.Provider.ApiKey)
+	}
+	if cfg.Provider.Region != "us-east-1" {
+		t.Errorf("expected Region=us-east-1, got %q", cfg.Provider.Region)
+	}
+}
+
+type PtrStructDefaultConfig struct {
+	Provider *ProviderDefaultConfig `env:"PROVIDER"`
+}
+
+type ProviderDefaultConfig struct {
+	ApiKey string `env:"API_KEY"`
+	Region string `env:"REGION,default=us-east-1"`
+}
+
+func TestUnmarshalPtrStructNestedDefaults(t *testing.T) {
+	var cfg PtrStructDefaultConfig
+	err := Unmarshal(map[string]string{}, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider == nil {
+		t.Fatal("expected Provider to be non-nil due to default on Region")
+	}
+	if cfg.Provider.ApiKey != "" {
+		t.Errorf("expected empty ApiKey, got %q", cfg.Provider.ApiKey)
+	}
+	if cfg.Provider.Region != "us-east-1" {
+		t.Errorf("expected Region=us-east-1, got %q", cfg.Provider.Region)
+	}
+}
+
+type DeepPtrConfig struct {
+	Provider *DeepProviderConfig `env:"PROVIDER"`
+}
+
+type DeepProviderConfig struct {
+	Region *DeepRegionConfig `env:"REGION"`
+}
+
+type DeepRegionConfig struct {
+	Name string `env:"NAME"`
+}
+
+func TestUnmarshalPtrStructNestedDeepNil(t *testing.T) {
+	var cfg DeepPtrConfig
+	err := Unmarshal(map[string]string{}, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != nil {
+		t.Errorf("expected Provider to be nil when no env vars match")
+	}
+}
+
+func TestUnmarshalPtrStructNestedDeepSet(t *testing.T) {
+	env := map[string]string{
+		"PROVIDER_REGION_NAME": "us-east-1",
+	}
+
+	var cfg DeepPtrConfig
+	err := Unmarshal(env, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider == nil {
+		t.Fatal("expected Provider to be non-nil")
+	}
+	if cfg.Provider.Region == nil {
+		t.Fatal("expected Region to be non-nil")
+	}
+	if cfg.Provider.Region.Name != "us-east-1" {
+		t.Errorf("expected Name=us-east-1, got %q", cfg.Provider.Region.Name)
+	}
+}
+
+func TestUnmarshalPtrStructNestedTagless(t *testing.T) {
+	type TaglessProvider struct {
+		Endpoint string `env:"ENDPOINT"`
+	}
+
+	type TaglessConfig struct {
+		Provider *TaglessProvider
+	}
+
+	env := map[string]string{
+		"Provider_ENDPOINT": "https://api.example.com",
+	}
+
+	var cfg TaglessConfig
+	err := Unmarshal(env, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider == nil {
+		t.Fatal("expected Provider to be non-nil")
+	}
+	if cfg.Provider.Endpoint != "https://api.example.com" {
+		t.Errorf("expected Endpoint=https://api.example.com, got %q", cfg.Provider.Endpoint)
+	}
+}
+
+func TestUnmarshalNestedValueType(t *testing.T) {
+	type Inner struct {
+		X string `env:"X"`
+		Y int    `env:"Y"`
+	}
+	type Outer struct {
+		Inner Inner `env:"INNER"`
+	}
+
+	env := map[string]string{
+		"INNER_X": "hello",
+		"INNER_Y": "42",
+	}
+
+	var cfg Outer
+	err := Unmarshal(env, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Inner.X != "hello" {
+		t.Errorf("expected X=hello, got %q", cfg.Inner.X)
+	}
+	if cfg.Inner.Y != 42 {
+		t.Errorf("expected Y=42, got %d", cfg.Inner.Y)
+	}
+}
+
+func TestUnmarshalPtrStructWithPrefix(t *testing.T) {
+	type Sub struct {
+		Key string `env:"KEY"`
+	}
+	type Outer struct {
+		Sub *Sub `env:"SUB"`
+	}
+
+	env := map[string]string{
+		"APP_SUB_KEY": "secret",
+		"OTHER":       "irrelevant",
+	}
+
+	var cfg Outer
+	err := UnmarshalWithPrefix("APP_", env, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sub == nil {
+		t.Fatal("expected Sub to be non-nil")
+	}
+	if cfg.Sub.Key != "secret" {
+		t.Errorf("expected Key=secret, got %q", cfg.Sub.Key)
+	}
+}
+
+func TestUnmarshalPtrStructNestedNoEnv(t *testing.T) {
+	type Sub struct {
+		A string `env:"A"`
+		B string `env:"B"`
+	}
+	type Outer struct {
+		Sub *Sub `env:"SUB"`
+	}
+
+	env := map[string]string{
+		"UNRELATED": "value",
+	}
+
+	var cfg Outer
+	err := Unmarshal(env, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sub != nil {
+		t.Errorf("expected Sub to be nil when no env vars match the SUB_ prefix")
 	}
 }
 
@@ -544,15 +780,19 @@ func TestUnmarshalInvalidFloat(t *testing.T) {
 }
 
 func TestUnmarshalErrorImplements(t *testing.T) {
-	var cfg BasicConfig
-	err := Unmarshal(map[string]string{}, &cfg)
+	type Config struct {
+		Port int `env:"PORT"`
+	}
 
-	// Check the error type can be inspected
+	var cfg Config
+	err := Unmarshal(map[string]string{"PORT": "notanint"}, &cfg)
+	if err == nil {
+		t.Fatal("expected error for invalid int")
+	}
+
 	var target *strconvErr
-	if err != nil {
-		if errors.As(err, &target) {
-			t.Fatalf("unexpected strconvErr: %v", target)
-		}
+	if !errors.As(err, &target) {
+		t.Fatalf("expected error chain to contain *strconvErr, got %T", err)
 	}
 }
 
@@ -836,5 +1076,84 @@ func TestLoadThenUnmarshal(t *testing.T) {
 	}
 	if cfg.Port != 9090 {
 		t.Errorf("expected Port=9090, got %d", cfg.Port)
+	}
+}
+
+type SliceTextUnmarshalerConfig struct {
+	IPs  []net.IP  `env:"IPS"`
+	URLs []url.URL `env:"URLS"`
+}
+
+func TestUnmarshalSliceTextUnmarshaler(t *testing.T) {
+	env := map[string]string{
+		"IPS":  "192.168.1.1,10.0.0.1",
+		"URLS": "https://example.com,https://opencode.ai",
+	}
+
+	var cfg SliceTextUnmarshalerConfig
+	err := Unmarshal(env, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(cfg.IPs) != 2 {
+		t.Fatalf("expected 2 IPs, got %d", len(cfg.IPs))
+	}
+	if !cfg.IPs[0].Equal(net.ParseIP("192.168.1.1")) {
+		t.Errorf("expected 192.168.1.1, got %v", cfg.IPs[0])
+	}
+	if !cfg.IPs[1].Equal(net.ParseIP("10.0.0.1")) {
+		t.Errorf("expected 10.0.0.1, got %v", cfg.IPs[1])
+	}
+
+	if len(cfg.URLs) != 2 {
+		t.Fatalf("expected 2 URLs, got %d", len(cfg.URLs))
+	}
+	if cfg.URLs[0].String() != "https://example.com" {
+		t.Errorf("expected https://example.com, got %s", cfg.URLs[0].String())
+	}
+	if cfg.URLs[1].String() != "https://opencode.ai" {
+		t.Errorf("expected https://opencode.ai, got %s", cfg.URLs[1].String())
+	}
+}
+
+type SliceNetipAddrConfig struct {
+	Addrs []netip.Addr `env:"ADDRS"`
+}
+
+func TestUnmarshalSliceNetipAddr(t *testing.T) {
+	env := map[string]string{
+		"ADDRS": "192.168.1.1,10.0.0.1,::1",
+	}
+
+	var cfg SliceNetipAddrConfig
+	err := Unmarshal(env, &cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(cfg.Addrs) != 3 {
+		t.Fatalf("expected 3 addrs, got %d", len(cfg.Addrs))
+	}
+	if cfg.Addrs[0] != netip.MustParseAddr("192.168.1.1") {
+		t.Errorf("expected 192.168.1.1, got %s", cfg.Addrs[0])
+	}
+	if cfg.Addrs[1] != netip.MustParseAddr("10.0.0.1") {
+		t.Errorf("expected 10.0.0.1, got %s", cfg.Addrs[1])
+	}
+	if cfg.Addrs[2] != netip.MustParseAddr("::1") {
+		t.Errorf("expected ::1, got %s", cfg.Addrs[2])
+	}
+}
+
+type UnsupportedSliceElementConfig struct {
+	Data []struct{ X int } `env:"DATA"`
+}
+
+func TestUnmarshalUnsupportedSliceElement(t *testing.T) {
+	var cfg UnsupportedSliceElementConfig
+	err := Unmarshal(map[string]string{"DATA": "1,2,3"}, &cfg)
+	if err == nil {
+		t.Fatal("expected error for unsupported slice element type")
 	}
 }

@@ -1,6 +1,7 @@
 package env
 
 import (
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -34,22 +35,33 @@ func setSlice(fieldVal reflect.Value, val string) error {
 			continue
 		}
 
-		var elem reflect.Value
-		if elemType.Kind() == reflect.Struct && !isBuiltinStruct(elemType) {
-			return nil
-		}
+		testVal := reflect.New(elemType).Elem()
 
-		conv := builtinConverter(elemType)
-		if conv != nil {
-			converted, err := conv(part)
-			if err != nil {
-				return err
+		var elem reflect.Value
+		switch {
+		case isTextUnmarshaler(testVal):
+			elem = testVal
+			if err := elem.Addr().Interface().(interface{ UnmarshalText([]byte) error }).UnmarshalText([]byte(part)); err != nil {
+				return fmt.Errorf("cannot unmarshal %q into %s: %w", part, elemType, err)
 			}
-			elem = converted
-		} else if elemType.Kind() == reflect.String {
-			elem = reflect.ValueOf(part)
-		} else {
-			return nil
+		case isBinaryUnmarshaler(testVal):
+			elem = testVal
+			if err := elem.Addr().Interface().(interface{ UnmarshalBinary([]byte) error }).UnmarshalBinary([]byte(part)); err != nil {
+				return fmt.Errorf("cannot unmarshal %q into %s: %w", part, elemType, err)
+			}
+		default:
+			conv := builtinConverter(elemType)
+			if conv != nil {
+				converted, err := conv(part)
+				if err != nil {
+					return err
+				}
+				elem = converted
+			} else if elemType.Kind() == reflect.String {
+				elem = reflect.ValueOf(part)
+			} else {
+				return fmt.Errorf("env: unsupported slice element type %s", elemType)
+			}
 		}
 
 		if isPtr {
