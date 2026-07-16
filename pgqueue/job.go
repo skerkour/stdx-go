@@ -1,32 +1,11 @@
-package queue
+package pgqueue
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"time"
 
-	"github.com/skerkour/stdx-go/db"
 	"github.com/skerkour/stdx-go/uuid"
-)
-
-// TODO: detect job that have expired (timeout)
-
-const (
-	MinRetryMax     int64 = 0
-	MaxRetryMax     int64 = 100
-	DefaultRetryMax int64 = 5
-
-	MinRetryDelay     int64 = 1
-	MaxRetryDelay     int64 = 86_400 // 1 day
-	DefaultRetryDelay int64 = 5
-
-	DefaultRetryStrategy = RetryStrategyConstant
-
-	MinTimeout     int64 = 1
-	MaxTimeout     int64 = 7200
-	DefaultTimeout int64 = 60
 )
 
 type JobStatus int32
@@ -44,30 +23,26 @@ const (
 	RetryStrategyExponential
 )
 
-var (
-	ErrJobSatusIsNotValid = func(status string) error {
-		return fmt.Errorf(`Job status "%s" is not valid`, status)
-	}
-	ErrRetryStrategyIsNotValid = func(status string) error {
-		return fmt.Errorf(`Retry strategy "%s" is not valid`, status)
-	}
-)
-
-type Queue interface {
-	Push(ctx context.Context, tx db.Queryer, newJob NewJobInput) error
-	PushMany(ctx context.Context, t db.Tx, newJobs []NewJobInput) error
-	// pull fetches at most `number_of_jobs` from the queue.
-	Pull(ctx context.Context, numberOfJobs uint64) ([]Job, error)
-	DeleteJob(ctx context.Context, jobID uuid.UUID) error
-	FailJob(ctx context.Context, job Job) error
-	Clear(ctx context.Context) error
-	GetJob(ctx context.Context, jobID uuid.UUID) (job Job, err error)
-
-	GetFailedJobs(ctx context.Context, limit int64) (jobs []Job, err error)
-}
-
 type JobData interface {
 	JobType() string
+}
+
+type Job struct {
+	ID             uuid.UUID       `db:"id" json:"id"`
+	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
+	ScheduledFor   time.Time       `db:"scheduled_for" json:"scheduled_for"`
+	FailedAttempts int32           `db:"failed_attempts" json:"failed_attempts"`
+	Status         JobStatus       `db:"status" json:"status"`
+	Type           string          `db:"type" json:"type"`
+	DataJson       json.RawMessage `db:"data" json:"data"`
+	// Maximum number of retries
+	RetryMax      int32         `db:"retry_max" json:"retry_max"`
+	RetryDelay    int32         `db:"retry_delay" json:"retry_delay"`
+	RetryStrategy RetryStrategy `db:"retry_strategy" json:"retry_strategy"`
+	// Time allowed for the job to complete before being re-queued or marked as failed, in seconds
+	Timeout int32 `db:"timeout" json:"timeout"`
+	// priority: i64,
 }
 
 type NewJobInput struct {
@@ -80,11 +55,11 @@ type NewJobInput struct {
 	// RetryMax is the max number of times a job should be retried
 	// 0-100
 	// default: 5
-	RetryMax *int64
+	RetryMax *int32
 
 	// RetryDelay is the number of seconds between 2 retry attempts. Allowed range: 1-86400
 	// default: 5
-	RetryDelay *int64
+	RetryDelay *int32
 
 	// constant, exponential
 	// default: Constant
@@ -92,28 +67,7 @@ type NewJobInput struct {
 
 	// Timeout in seconds. Allows range: 1-7200
 	// default: 60
-	Timeout *int64
-}
-
-type Job struct {
-	ID             uuid.UUID `db:"id" json:"id"`
-	CreatedAt      time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt      time.Time `db:"updated_at" json:"updated_at"`
-	ScheduledFor   time.Time `db:"scheduled_for" json:"scheduled_for"`
-	FailedAttempts int64     `db:"failed_attempts" json:"failed_attempts"`
-	// priority: i64,
-	Status        JobStatus       `db:"status" json:"status"`
-	Type          string          `db:"type" json:"type"`
-	RawData       json.RawMessage `db:"data" json:"data"`
-	RetryMax      int64           `db:"retry_max" json:"retry_max"`
-	RetryDelay    int64           `db:"retry_delay" json:"retry_delay"`
-	RetryStrategy RetryStrategy   `db:"retry_strategy" json:"retry_strategy"`
-	Timeout       int64           `db:"timeout" json:"timeout"`
-}
-
-func (job *Job) GetData(data any) (err error) {
-	err = json.Unmarshal(job.RawData, &data)
-	return err
+	Timeout *int32
 }
 
 func (status JobStatus) MarshalText() (ret []byte, err error) {

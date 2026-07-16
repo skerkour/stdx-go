@@ -387,12 +387,13 @@ func (pgqueue *PostgreSQLQueue) failTimedOutJobs(ctx context.Context) {
 	// return
 }
 
-func (pgqueue *PostgreSQLQueue) GetFailedJobs(ctx context.Context) (jobs []queue.Job, err error) {
+func (pgqueue *PostgreSQLQueue) GetFailedJobs(ctx context.Context, limit int64) (jobs []queue.Job, err error) {
 	jobs = make([]queue.Job, 0)
 	query := `SELECT * FROM queue WHERE status = $1
-		ORDER BY created_at DESC`
+		ORDER BY created_at DESC
+		LIMIT $2`
 
-	err = pgqueue.db.Select(ctx, &jobs, query, queue.JobStatusFailed)
+	err = pgqueue.db.Select(ctx, &jobs, query, queue.JobStatusFailed, limit)
 	return jobs, err
 }
 
