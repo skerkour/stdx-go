@@ -11,7 +11,7 @@ func Example() {
 	alicePrivateKey := xwing.GenerateDecapsulationKey()
 
 	// send Alice's PublicKey to Bob with alciePublicKey.Bytes()
-	alicePublicKey := alicePrivateKey.EncapsulationKey()
+	alicePublicKey, err := xwing.NewEncapsulationKeyFromBytes(alicePrivateKey.EncapsulationKey().Bytes())
 	// Bob can now compute a sharedSecret and a ciphertext
 	bobSharedSecret, ciphertext, err := alicePublicKey.Encapsulate()
 	if err != nil {
