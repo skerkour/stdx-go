@@ -10,7 +10,7 @@ import (
 func Example() {
 	alicePrivateKey := xwing.GenerateDecapsulationKey()
 
-	// send alicePublicKey to Bob with alciePublicKey.Bytes()
+	// send Alice's PublicKey to Bob with alciePublicKey.Bytes()
 	alicePublicKey := alicePrivateKey.EncapsulationKey()
 	// Bob can now compute a sharedSecret and a ciphertext
 	bobSharedSecret, ciphertext, err := alicePublicKey.Encapsulate()
@@ -18,7 +18,7 @@ func Example() {
 		log.Fatal(err)
 	}
 
-	// send the ciphertext to Alice
+	// Send the ciphertext to Alice
 	// Alice can know compute the same shared secret as Bob
 	aliceSharedSecret, err := alicePrivateKey.Decapsulate(ciphertext)
 	if err != nil {
