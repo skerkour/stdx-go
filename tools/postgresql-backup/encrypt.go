@@ -1,48 +1,41 @@
 package main
 
 import (
-	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha512"
-	"encoding/hex"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 
+	"github.com/skerkour/stdx-go/xwing"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 )
 
 const (
-	encryptionKeySize = 32
-	nonceSize         = 24
-	ephemeralKeySize  = 32
+	encryptionKeySize    = 32
+	nonceSize            = 24
+	ciphertextHeaderSize = xwing.CiphertextSize
 )
 
-func encrypt(plaintext []byte, publicKeyHex string) ([]byte, error) {
-	pubKeyBytes, err := hex.DecodeString(publicKeyHex)
+func encrypt(plaintext []byte, publicKeyBase64 string) ([]byte, error) {
+	encapKeyBytes, err := base64.StdEncoding.DecodeString(publicKeyBase64)
 	if err != nil {
 		return nil, err
 	}
 
-	curve := ecdh.X25519()
-	recipientPubKey, err := curve.NewPublicKey(pubKeyBytes)
+	encapKey, err := xwing.NewEncapsulationKeyFromBytes(encapKeyBytes)
 	if err != nil {
 		return nil, err
 	}
 
-	ephemeralPrivKey, err := curve.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	ephemeralPubKey := ephemeralPrivKey.PublicKey()
-
-	sharedSecret, err := ephemeralPrivKey.ECDH(recipientPubKey)
+	sharedSecret, ciphertextHeader, err := encapKey.Encapsulate()
 	if err != nil {
 		return nil, err
 	}
 
-	encKey, err := deriveEncryptionKey(sharedSecret)
+	encKey, err := deriveEncryptionKey(sharedSecret[:])
 	if err != nil {
 		return nil, err
 	}
@@ -59,45 +52,39 @@ func encrypt(plaintext []byte, publicKeyHex string) ([]byte, error) {
 
 	ciphertext := cipher.Seal(nil, nonce, plaintext, nil)
 
-	result := make([]byte, 0, ephemeralKeySize+nonceSize+len(ciphertext))
-	result = append(result, ephemeralPubKey.Bytes()...)
+	result := make([]byte, 0, ciphertextHeaderSize+nonceSize+len(ciphertext))
+	result = append(result, ciphertextHeader...)
 	result = append(result, nonce...)
 	result = append(result, ciphertext...)
 
 	return result, nil
 }
 
-func decrypt(data []byte, privateKeyHex string) ([]byte, error) {
-	privKeyBytes, err := hex.DecodeString(privateKeyHex)
+func decrypt(data []byte, privateKeyBase64 string) ([]byte, error) {
+	seedBytes, err := base64.StdEncoding.DecodeString(privateKeyBase64)
 	if err != nil {
 		return nil, err
 	}
 
-	curve := ecdh.X25519()
-	privKey, err := curve.NewPrivateKey(privKeyBytes)
-	if err != nil {
-		return nil, err
-	}
+	var seed [32]byte
+	copy(seed[:], seedBytes)
 
-	if len(data) < ephemeralKeySize+nonceSize {
+	decapKey := xwing.NewDecapsulationKeyFromSeed(seed)
+
+	if len(data) < ciphertextHeaderSize+nonceSize {
 		return nil, errors.New("invalid encrypted payload: too short")
 	}
 
-	ephemeralPubKeyBytes := data[:ephemeralKeySize]
-	nonce := data[ephemeralKeySize : ephemeralKeySize+nonceSize]
-	ciphertext := data[ephemeralKeySize+nonceSize:]
+	ciphertextHeader := data[:ciphertextHeaderSize]
+	nonce := data[ciphertextHeaderSize : ciphertextHeaderSize+nonceSize]
+	ciphertext := data[ciphertextHeaderSize+nonceSize:]
 
-	ephemeralPubKey, err := curve.NewPublicKey(ephemeralPubKeyBytes)
+	sharedSecret, err := decapKey.Decapsulate(ciphertextHeader)
 	if err != nil {
 		return nil, err
 	}
 
-	sharedSecret, err := privKey.ECDH(ephemeralPubKey)
-	if err != nil {
-		return nil, err
-	}
-
-	encKey, err := deriveEncryptionKey(sharedSecret)
+	encKey, err := deriveEncryptionKey(sharedSecret[:])
 	if err != nil {
 		return nil, err
 	}

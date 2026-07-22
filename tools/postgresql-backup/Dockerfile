@@ -1,7 +1,7 @@
 ####################################################################################################
 ## Builder image
 ####################################################################################################
-FROM golang:latest AS builder_go
+FROM golang:1.27rc2 AS builder_go
 
 ENV TZ="UTC"
 # ENV LC_ALL="en_US.UTF-8"
@@ -37,23 +37,23 @@ ENV LANGUAGE="en_US:en"
 
 RUN apk update && \
     apk upgrade --no-cache && \
-    apk add --no-cache ca-certificates postgresql17-client mailcap tzdata
-RUN update-ca-certificates
+    apk add --no-cache ca-certificates postgresql17-client mailcap tzdata && \
+    update-ca-certificates && \
+    adduser \
+        --disabled-password \
+        --gecos "" \
+        --shell "/bin/nonexisting" \
+        --no-create-home \
+        --uid 1001 \
+        "pgbakcup" && \
+    echo "UTC" > /etc/timezone
 
-RUN echo "UTC" > /etc/timezone
 
 # Copy our builds
 COPY --from=builder_go /stdx-go/dist/postgresql-backup /usr/local/bin/postgresql-backup
 
 
 # Use an unprivileged user.
-RUN adduser \
-    --disabled-password \
-    --gecos "" \
-    --shell "/bin/nonexisting" \
-    --no-create-home \
-    --uid 1001 \
-    "pgbakcup"
 USER pgbakcup:pgbakcup
 
 # Final working directory

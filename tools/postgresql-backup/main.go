@@ -2,8 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/ecdh"
-	"encoding/hex"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/skerkour/stdx-go/cron"
+	"github.com/skerkour/stdx-go/xwing"
 	"github.com/skerkour/stdx-go/yaml"
 )
 
@@ -21,7 +21,7 @@ func main() {
 	configPath := flag.String("config", "", "path to config file")
 	decryptFile := flag.String("decrypt", "", "path to encrypted file to decrypt")
 	outputFile := flag.String("out", "", "output file (decrypt mode)")
-	genKey := flag.Bool("generate", false, "generate a X25519 keypair")
+	genKey := flag.Bool("generate", false, "generate an X-Wing keypair")
 	flag.Parse()
 
 	if *genKey {
@@ -54,8 +54,8 @@ func main() {
 	scheduler := cron.New()
 
 	for _, db := range cfg.Databases {
-		if _, err := hex.DecodeString(db.PublicKey); err != nil {
-			slog.Error("invalid public_key hex", "folder", db.Folder, "error", err)
+		if _, err := base64.StdEncoding.DecodeString(db.PublicKey); err != nil {
+			slog.Error("invalid public_key base64", "folder", db.Folder, "error", err)
 			os.Exit(1)
 		}
 
@@ -77,8 +77,8 @@ func main() {
 }
 
 func runDecrypt(inputPath, outputPath string) {
-	keyHex := os.Getenv("KEY")
-	if keyHex == "" {
+	keyBase64 := os.Getenv("KEY")
+	if keyBase64 == "" {
 		slog.Error("KEY environment variable is required")
 		os.Exit(1)
 	}
@@ -99,7 +99,7 @@ func runDecrypt(inputPath, outputPath string) {
 		os.Exit(1)
 	}
 
-	plaintext, err := decrypt(data, keyHex)
+	plaintext, err := decrypt(data, keyBase64)
 	if err != nil {
 		slog.Error("decryption failed", "error", err)
 		os.Exit(1)
@@ -153,8 +153,13 @@ func loadConfig(path string) (*Config, error) {
 		if db.PublicKey == "" {
 			return nil, errors.New("database public_key is required")
 		}
-		if len(db.PublicKey) != 64 {
-			return nil, errors.New("database public_key is invalid")
+
+		pubKeyBytes, err := base64.StdEncoding.DecodeString(db.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("database public_key: invalid base64: %w", err)
+		}
+		if len(pubKeyBytes) != xwing.EncapsulationKeySize {
+			return nil, fmt.Errorf("database public_key: expected %d bytes, got %d", xwing.EncapsulationKeySize, len(pubKeyBytes))
 		}
 
 		if db.Cron == "" {
@@ -169,13 +174,11 @@ func loadConfig(path string) (*Config, error) {
 }
 
 func generateKeypair() {
-	curve := ecdh.X25519()
-	secretKey, err := curve.GenerateKey(nil)
-	if err != nil {
-		slog.Error("generating keypair", "error", err)
-		os.Exit(1)
-	}
+	decapKey := xwing.GenerateDecapsulationKey()
 
-	fmt.Printf("secret key: %s\n", hex.EncodeToString(secretKey.Bytes()))
-	fmt.Printf("public key: %s\n", hex.EncodeToString(secretKey.PublicKey().Bytes()))
+	secretKeyBase64 := base64.StdEncoding.EncodeToString(decapKey.Bytes())
+	publicKeyBase64 := base64.StdEncoding.EncodeToString(decapKey.EncapsulationKey().Bytes())
+
+	fmt.Printf("secret key: %s\n", secretKeyBase64)
+	fmt.Printf("public key: %s\n", publicKeyBase64)
 }
