@@ -45,12 +45,16 @@ s3:
   access_key_id: AKIAIOSFODNN7EXAMPLE
   secret_access_key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 
+public_key: <xwing-encapsulation-key-base64>   # optional; use the same public ke for all databases
+
 databases:
   - url: postgres://user:pass@host:5432/mydb
-    public_key: <xwing-encapsulation-key-base64>   # 1216-byte X-Wing encapsulation (public) key, base64-encoded
+    public_key: <xwing-encapsulation-key-base64>   # 1216-byte X-Wing encapsulation (public) key, base64-encoded; optional, the global public_key is used if empty
     cron: "0 0 * * *"                              # 5-field cron
     folder: myapp-prod                             # S3 key prefix
 ```
+
+`public_key` can be set at the top level (shared by all databases) or per-database. If both are set, the per-database value takes precedence. If neither is set, the config is invalid.
 
 ## Encrypted file format
 

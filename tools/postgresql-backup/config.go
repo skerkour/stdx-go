@@ -2,6 +2,7 @@ package main
 
 type Config struct {
 	S3        S3Config         `yaml:"s3"`
+	PublicKey string           `yaml:"public_key"`
 	Databases []DatabaseConfig `yaml:"databases"`
 }
 

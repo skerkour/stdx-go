@@ -54,11 +54,6 @@ func main() {
 	scheduler := cron.New()
 
 	for _, db := range cfg.Databases {
-		if _, err := base64.StdEncoding.DecodeString(db.PublicKey); err != nil {
-			slog.Error("invalid public_key base64", "folder", db.Folder, "error", err)
-			os.Exit(1)
-		}
-
 		_, err := scheduler.AddFunc(db.Cron, func() {
 			slog.Info("running backup", "folder", db.Folder)
 			if err := createBackup(context.Background(), s3Client, cfg.S3, db); err != nil {
@@ -125,33 +120,38 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
 
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	var config Config
+	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
 
-	if cfg.S3.Endpoint == "" {
+	if config.S3.Endpoint == "" {
 		return nil, errors.New("s3.endpoint is required")
 	}
-	if cfg.S3.Bucket == "" {
+	if config.S3.Bucket == "" {
 		return nil, errors.New("s3.bucket is required")
 	}
-	if cfg.S3.AccessKeyID == "" {
+	if config.S3.AccessKeyID == "" {
 		return nil, errors.New("s3.access_key_id is required")
 	}
-	if cfg.S3.SecretAccessKey == "" {
+	if config.S3.SecretAccessKey == "" {
 		return nil, errors.New("s3.secret_access_key is required")
 	}
-	if cfg.S3.Region == "" {
-		cfg.S3.Region = "auto"
+	if config.S3.Region == "" {
+		config.S3.Region = "auto"
 	}
 
-	for _, db := range cfg.Databases {
+	for i := range config.Databases {
+		db := &config.Databases[i]
 		if db.URL == "" {
 			return nil, errors.New("database url is required")
 		}
+
 		if db.PublicKey == "" {
-			return nil, errors.New("database public_key is required")
+			db.PublicKey = config.PublicKey
+		}
+		if db.PublicKey == "" {
+			return nil, errors.New("database public_key is required (set per-database or globally)")
 		}
 
 		pubKeyBytes, err := base64.StdEncoding.DecodeString(db.PublicKey)
@@ -170,7 +170,7 @@ func loadConfig(path string) (*Config, error) {
 		}
 	}
 
-	return &cfg, nil
+	return &config, nil
 }
 
 func generateKeypair() {
