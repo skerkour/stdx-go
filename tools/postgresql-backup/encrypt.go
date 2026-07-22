@@ -35,7 +35,7 @@ func encrypt(plaintext []byte, publicKeyBase64 string) ([]byte, error) {
 		return nil, err
 	}
 
-	encKey, err := deriveEncryptionKey(sharedSecret[:])
+	encryptionKey, err := deriveEncryptionKey(sharedSecret[:])
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +45,7 @@ func encrypt(plaintext []byte, publicKeyBase64 string) ([]byte, error) {
 		return nil, err
 	}
 
-	cipher, err := chacha20poly1305.NewX(encKey)
+	cipher, err := chacha20poly1305.NewX(encryptionKey[:])
 	if err != nil {
 		return nil, err
 	}
@@ -71,8 +71,8 @@ func decrypt(data []byte, privateKeyBase64 string) ([]byte, error) {
 
 	decapKey := xwing.NewDecapsulationKeyFromSeed(seed)
 
-	if len(data) < ciphertextHeaderSize+nonceSize {
-		return nil, errors.New("invalid encrypted payload: too short")
+	if len(data) <= ciphertextHeaderSize+nonceSize {
+		return nil, errors.New("invalid encrypted file: too short")
 	}
 
 	ciphertextHeader := data[:ciphertextHeaderSize]
@@ -81,15 +81,15 @@ func decrypt(data []byte, privateKeyBase64 string) ([]byte, error) {
 
 	sharedSecret, err := decapKey.Decapsulate(ciphertextHeader)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error decapsulating X-Wing ciphertext: %w", err)
 	}
 
-	encKey, err := deriveEncryptionKey(sharedSecret[:])
+	encryptionKey, err := deriveEncryptionKey(sharedSecret[:])
 	if err != nil {
 		return nil, err
 	}
 
-	cipher, err := chacha20poly1305.NewX(encKey)
+	cipher, err := chacha20poly1305.NewX(encryptionKey[:])
 	if err != nil {
 		return nil, err
 	}
@@ -102,11 +102,13 @@ func decrypt(data []byte, privateKeyBase64 string) ([]byte, error) {
 	return plaintext, nil
 }
 
-func deriveEncryptionKey(sharedSecret []byte) ([]byte, error) {
+func deriveEncryptionKey(sharedSecret []byte) ([32]byte, error) {
+	var key [32]byte
+
 	hkdfReader := hkdf.New(sha512.New, sharedSecret, nil, []byte("postgresql-backup"))
-	key := make([]byte, encryptionKeySize)
-	if _, err := io.ReadFull(hkdfReader, key); err != nil {
-		return nil, fmt.Errorf("hkdf: %w", err)
+	if _, err := io.ReadFull(hkdfReader, key[:]); err != nil {
+		return [32]byte{}, fmt.Errorf("hkdf: %w", err)
 	}
+
 	return key, nil
 }

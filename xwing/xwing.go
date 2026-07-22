@@ -70,27 +70,6 @@ func NewDecapsulationKeyFromSeed(seed [32]byte) *DecapsulationKey {
 	return decapKey
 }
 
-func NewEncapsulationKeyFromBytes(encapKeyBytes []byte) (*EncapsulationKey, error) {
-	if len(encapKeyBytes) != EncapsulationKeySize {
-		return nil, errors.New("xwing: invalid encapsulation key size")
-	}
-
-	publicKeyMlkem := encapKeyBytes[:mlkem.EncapsulationKeySize768]
-	publicKeyX25519 := encapKeyBytes[mlkem.EncapsulationKeySize768:]
-
-	mlkemEncapsulationKey, err := mlkem.NewEncapsulationKey768(publicKeyMlkem)
-	if err != nil {
-		return nil, err
-	}
-
-	encapKey := &EncapsulationKey{
-		mlkemEncapsulationKey: mlkemEncapsulationKey,
-	}
-	copy(encapKey.publicKeyX25519[:], publicKeyX25519)
-
-	return encapKey, nil
-}
-
 func (decapKey *DecapsulationKey) Bytes() []byte {
 	return bytes.Clone(decapKey.seed[:])
 }
@@ -122,7 +101,29 @@ func (decapKey *DecapsulationKey) Decapsulate(ciphertext []byte) ([SharedKeySize
 		return [SharedKeySize]byte{}, err
 	}
 
-	return combiner(sharedSecretMlkem, sharedSecretX25519, ciphertextX25519, publicKeyX25519), nil
+	sharedSecret := combiner(sharedSecretMlkem, sharedSecretX25519, ciphertextX25519, publicKeyX25519)
+	return sharedSecret, nil
+}
+
+func NewEncapsulationKeyFromBytes(encapKeyBytes []byte) (*EncapsulationKey, error) {
+	if len(encapKeyBytes) != EncapsulationKeySize {
+		return nil, errors.New("xwing: invalid encapsulation key size")
+	}
+
+	publicKeyMlkem := encapKeyBytes[:mlkem.EncapsulationKeySize768]
+	publicKeyX25519 := encapKeyBytes[mlkem.EncapsulationKeySize768:]
+
+	mlkemEncapsulationKey, err := mlkem.NewEncapsulationKey768(publicKeyMlkem)
+	if err != nil {
+		return nil, err
+	}
+
+	encapKey := &EncapsulationKey{
+		mlkemEncapsulationKey: mlkemEncapsulationKey,
+	}
+	copy(encapKey.publicKeyX25519[:], publicKeyX25519)
+
+	return encapKey, nil
 }
 
 func (encapKey *EncapsulationKey) Encapsulate() (sharedSecret [SharedKeySize]byte, ciphertext []byte, err error) {
@@ -162,6 +163,7 @@ var xwingLabel = []byte("\\.//^\\")
 
 func combiner(sharedSecretMlkem, sharedSecretX25519, x25519Ciphertext, x25519PublicKey []byte) [SharedKeySize]byte {
 	var sharedKey [SharedKeySize]byte
+
 	hasher := sha3.New256()
 	hasher.Write(sharedSecretMlkem)
 	hasher.Write(sharedSecretX25519)

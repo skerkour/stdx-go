@@ -3,7 +3,7 @@
 Encrypted PostgreSQL backups to S3-compatible storage.
 
 - `pg_dump` -> gzip -> XChaCha20-Poly1305 encrypt -> S3 upload
-- X-Wing hybrid KEM (X25519 + ML-KEM-768) + HKDF-SHA-512 key exchange per backup
+- X-Wing hybrid post-quantum KEM (X25519 + ML-KEM-768) + HKDF-SHA-512 key exchange per backup
 - Cron-based scheduling
 
 ## Usage
@@ -19,9 +19,9 @@ postgresql-backup -config config.yaml
 ```
 
 **Decrypt a backup:**
-```
+```bash
 KEY=<xwing-secret-key-base64> postgresql-backup -decrypt backup.sql.gz.enc -out restore.sql
-# auto-derives output path (strips .enc):
+# auto-derives output path (strips .gz.enc):
 KEY=... postgresql-backup -decrypt backup.sql.gz.enc
 ```
 
@@ -47,7 +47,7 @@ s3:
 
 databases:
   - url: postgres://user:pass@host:5432/mydb
-    public_key: <xwing-encapsulation-key-base64>   # 1624 base64 chars (1216-byte X-Wing encapsulation key)
+    public_key: <xwing-encapsulation-key-base64>   # 1216-byte X-Wing encapsulation (public) key, base64-encoded
     cron: "0 0 * * *"                              # 5-field cron
     folder: myapp-prod                             # S3 key prefix
 ```
