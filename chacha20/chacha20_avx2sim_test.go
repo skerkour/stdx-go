@@ -8,14 +8,10 @@ import (
 )
 
 // This file simulates the amd64/AVX2 8-block implementation
-// (chacha20_amd64.go) in pure Go, so that the row layout, row shuffles and
-// VPSHUFB rotation constants can be validated on any host, without AVX2
-// hardware. It mirrors chacha8BlocksAVX2 operation for operation.
-
-var (
-	simRotl8Idx  = [32]int8{3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14, 3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14}
-	simRotl16Idx = [32]int8{2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13, 2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13}
-)
+// (chacha20_amd64.go) in pure Go, so that the word-major layout, the quarter
+// rounds and the 4x4 transpose can be validated on any host, without AVX2
+// hardware. It mirrors chacha8BlocksAVX2 and transpose4AVX2 operation for
+// operation.
 
 type simReg [8]uint32
 
@@ -54,41 +50,23 @@ func simShr(x simReg, n uint) simReg {
 	return x
 }
 
-// simPerm implements Uint32x8.PermuteScalarsGrouped: the 4 selected elements
-// are applied independently to each 128-bit lane.
-func simPerm(x simReg, a, b, c, d int) simReg {
-	return simReg{x[a], x[b], x[c], x[d], x[a+4], x[b+4], x[c+4], x[d+4]}
-}
-
-// simPshufbRot implements the VPSHUFB-based rotation of chacha20_amd64.go:
-// reshape to bytes, byte-permute within each 128-bit lane, reshape back.
-func simPshufbRot(x simReg, idx [32]int8) simReg {
-	var buf [32]uint8
-	for i := 0; i < 8; i++ {
-		binary.LittleEndian.PutUint32(buf[i*4:], x[i])
-	}
-	var out [32]uint8
-	for lane := 0; lane < 2; lane++ {
-		for i := 0; i < 16; i++ {
-			s := idx[lane*16+i]
-			if s < 0 {
-				out[lane*16+i] = 0
-			} else {
-				out[lane*16+i] = buf[lane*16+int(s)]
-			}
-		}
-	}
+func simBroadcast(v uint32) simReg {
 	var r simReg
-	for i := 0; i < 8; i++ {
-		r[i] = binary.LittleEndian.Uint32(out[i*4:])
+	for i := range r {
+		r[i] = v
 	}
 	return r
+}
+
+// simCounterVec mirrors counterVec: lane i holds counter+i.
+func simCounterVec(counter uint32) simReg {
+	return simReg{counter, counter + 1, counter + 2, counter + 3, counter + 4, counter + 5, counter + 6, counter + 7}
 }
 
 func simQuarterRound(a, b, c, d simReg) (simReg, simReg, simReg, simReg) {
 	a = simAdd(a, b)
 	d = simXor(d, a)
-	d = simPshufbRot(d, simRotl16Idx)
+	d = simOr(simShl(d, 16), simShr(d, 16))
 
 	c = simAdd(c, d)
 	b = simXor(b, c)
@@ -96,7 +74,7 @@ func simQuarterRound(a, b, c, d simReg) (simReg, simReg, simReg, simReg) {
 
 	a = simAdd(a, b)
 	d = simXor(d, a)
-	d = simPshufbRot(d, simRotl8Idx)
+	d = simOr(simShl(d, 8), simShr(d, 24))
 
 	c = simAdd(c, d)
 	b = simXor(b, c)
@@ -105,83 +83,110 @@ func simQuarterRound(a, b, c, d simReg) (simReg, simReg, simReg, simReg) {
 	return a, b, c, d
 }
 
-// simConcat128 implements Uint32x8.ConcatPermute128Scalars: the 256-bit
-// vectors x and y are treated as four 128-bit elements [x.lo, x.hi, y.lo,
-// y.hi]; the result is the concatenation [elem[lo], elem[hi]].
-func simConcat128(x, y simReg, lo, hi uint8) simReg {
-	elem := [4][4]uint32{
-		{x[0], x[1], x[2], x[3]},
-		{x[4], x[5], x[6], x[7]},
-		{y[0], y[1], y[2], y[3]},
-		{y[4], y[5], y[6], y[7]},
-	}
+// simInterleaveLo implements InterleaveLoGrouped: within each 128-bit lane,
+// [a0 b0 a1 b1].
+func simInterleaveLo(a, b simReg) simReg {
 	var r simReg
-	copy(r[:4], elem[lo][:])
-	copy(r[4:], elem[hi][:])
+	for lane := 0; lane < 2; lane++ {
+		base := lane * 4
+		r[base+0] = a[base+0]
+		r[base+1] = b[base+0]
+		r[base+2] = a[base+1]
+		r[base+3] = b[base+1]
+	}
 	return r
 }
 
-// simChacha8Blocks simulates chacha8BlocksAVX2 and returns the 8 64-byte
-// blocks in block-major order.
-func simChacha8Blocks(state [16]uint32, counter uint32) [8][16]uint32 {
-	var lo, hi simReg
-	for i := 0; i < 8; i++ {
-		lo[i] = state[i]
-		hi[i] = state[8+i]
+// simInterleaveHi implements InterleaveHiGrouped: within each 128-bit lane,
+// [a2 b2 a3 b3].
+func simInterleaveHi(a, b simReg) simReg {
+	var r simReg
+	for lane := 0; lane < 2; lane++ {
+		base := lane * 4
+		r[base+0] = a[base+2]
+		r[base+1] = b[base+2]
+		r[base+2] = a[base+3]
+		r[base+3] = b[base+3]
 	}
-	row0 := simConcat128(lo, lo, 0, 0)
-	row1 := simConcat128(lo, lo, 1, 1)
-	row2 := simConcat128(hi, hi, 0, 0)
-	row3 := func(g uint32) simReg {
-		return simReg{counter + 2*g, hi[5], hi[6], hi[7], counter + 2*g + 1, hi[5], hi[6], hi[7]}
-	}
+	return r
+}
 
-	var g [4][4]simReg
-	g[0] = [4]simReg{row0, row1, row2, row3(0)}
-	g[1] = [4]simReg{row0, row1, row2, row3(1)}
-	g[2] = [4]simReg{row0, row1, row2, row3(2)}
-	g[3] = [4]simReg{row0, row1, row2, row3(3)}
+// simConcatPermuteGrouped implements ConcatPermuteScalarsGrouped: per 128-bit
+// lane, select 4 elements where selectors 0-3 index x and 4-7 index y.
+func simConcatPermuteGrouped(x, y simReg, a, b, c, d int) simReg {
+	sel := [4]int{a, b, c, d}
+	var r simReg
+	for lane := 0; lane < 2; lane++ {
+		base := lane * 4
+		for i := 0; i < 4; i++ {
+			if sel[i] < 4 {
+				r[base+i] = x[base+sel[i]]
+			} else {
+				r[base+i] = y[base+sel[i]-4]
+			}
+		}
+	}
+	return r
+}
+
+// simTranspose4 mirrors transpose4AVX2.
+func simTranspose4(a, b, c, d simReg) (simReg, simReg, simReg, simReg) {
+	t0 := simInterleaveLo(a, b)
+	t1 := simInterleaveHi(a, b)
+	t2 := simInterleaveLo(c, d)
+	t3 := simInterleaveHi(c, d)
+	return simConcatPermuteGrouped(t0, t2, 0, 1, 4, 5),
+		simConcatPermuteGrouped(t0, t2, 2, 3, 6, 7),
+		simConcatPermuteGrouped(t1, t3, 0, 1, 4, 5),
+		simConcatPermuteGrouped(t1, t3, 2, 3, 6, 7)
+}
+
+// simChacha8Blocks simulates chacha8BlocksAVX2 + transpose4AVX2 and returns
+// the 8 64-byte blocks in block-major order.
+func simChacha8Blocks(state [16]uint32, counter uint32) [8][16]uint32 {
+	var w [16]simReg
+	for i := 0; i < 16; i++ {
+		if i == 12 {
+			w[i] = simCounterVec(counter)
+		} else {
+			w[i] = simBroadcast(state[i])
+		}
+	}
 
 	for r := 0; r < 10; r++ {
-		for i := 0; i < 4; i++ {
-			g[i][0], g[i][1], g[i][2], g[i][3] = simQuarterRound(g[i][0], g[i][1], g[i][2], g[i][3])
-		}
-		for i := 0; i < 4; i++ {
-			g[i][1] = simPerm(g[i][1], 1, 2, 3, 0)
-			g[i][2] = simPerm(g[i][2], 2, 3, 0, 1)
-			g[i][3] = simPerm(g[i][3], 3, 0, 1, 2)
-		}
-		for i := 0; i < 4; i++ {
-			g[i][0], g[i][1], g[i][2], g[i][3] = simQuarterRound(g[i][0], g[i][1], g[i][2], g[i][3])
-		}
-		for i := 0; i < 4; i++ {
-			g[i][1] = simPerm(g[i][1], 3, 0, 1, 2)
-			g[i][2] = simPerm(g[i][2], 2, 3, 0, 1)
-			g[i][3] = simPerm(g[i][3], 1, 2, 3, 0)
+		w[0], w[4], w[8], w[12] = simQuarterRound(w[0], w[4], w[8], w[12])
+		w[1], w[5], w[9], w[13] = simQuarterRound(w[1], w[5], w[9], w[13])
+		w[2], w[6], w[10], w[14] = simQuarterRound(w[2], w[6], w[10], w[14])
+		w[3], w[7], w[11], w[15] = simQuarterRound(w[3], w[7], w[11], w[15])
+
+		w[0], w[5], w[10], w[15] = simQuarterRound(w[0], w[5], w[10], w[15])
+		w[1], w[6], w[11], w[12] = simQuarterRound(w[1], w[6], w[11], w[12])
+		w[2], w[7], w[8], w[13] = simQuarterRound(w[2], w[7], w[8], w[13])
+		w[3], w[4], w[9], w[14] = simQuarterRound(w[3], w[4], w[9], w[14])
+	}
+
+	// add-back (constant reload)
+	for i := 0; i < 16; i++ {
+		if i == 12 {
+			w[i] = simAdd(w[i], simCounterVec(counter))
+		} else {
+			w[i] = simAdd(w[i], simBroadcast(state[i]))
 		}
 	}
 
-	// add-back
-	for i := 0; i < 4; i++ {
-		g[i][0] = simAdd(g[i][0], row0)
-		g[i][1] = simAdd(g[i][1], row1)
-		g[i][2] = simAdd(g[i][2], row2)
-		g[i][3] = simAdd(g[i][3], row3(uint32(i)))
+	// transpose each word group and de-interleave into blocks
+	var tr [4][4]simReg
+	for g := 0; g < 4; g++ {
+		tr[g][0], tr[g][1], tr[g][2], tr[g][3] = simTranspose4(w[4*g], w[4*g+1], w[4*g+2], w[4*g+3])
 	}
 
-	// de-interleave each group into its two blocks, using the same
-	// ConcatPermute128Scalars arguments as store8/xorStore8.
 	var blocks [8][16]uint32
-	for gid := 0; gid < 4; gid++ {
-		v0, v1, v2, v3 := g[gid][0], g[gid][1], g[gid][2], g[gid][3]
-		c0 := simConcat128(v0, v1, 0, 2) // block 2g rows 0-1 (words 0-7)
-		c1 := simConcat128(v2, v3, 0, 2) // block 2g rows 2-3 (words 8-15)
-		c2 := simConcat128(v0, v1, 1, 3) // block 2g+1 rows 0-1 (words 0-7)
-		c3 := simConcat128(v2, v3, 1, 3) // block 2g+1 rows 2-3 (words 8-15)
-		copy(blocks[2*gid][0:8], c0[:])
-		copy(blocks[2*gid][8:16], c1[:])
-		copy(blocks[2*gid+1][0:8], c2[:])
-		copy(blocks[2*gid+1][8:16], c3[:])
+	for b := 0; b < 4; b++ {
+		for g := 0; g < 4; g++ {
+			// tr[g][b]: block b (low half) and block b+4 (high half), words 4g..4g+3
+			copy(blocks[b][4*g:4*g+4], tr[g][b][0:4])
+			copy(blocks[b+4][4*g:4*g+4], tr[g][b][4:8])
+		}
 	}
 	return blocks
 }

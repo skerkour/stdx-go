@@ -8,27 +8,13 @@ import (
 	"unsafe"
 )
 
-// rotl8Idx/rotl16Idx are the VPSHUFB index vectors that rotate each 32-bit
-// element of a Uint32x8 by 8/16 bits. On AVX2 VPSHUFB operates within each
-// 128-bit lane, so the 16-byte pattern is repeated in both lanes.
-var (
-	rotl8Idx = archsimd.LoadInt8x32Array(&[32]int8{
-		3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14,
-		3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14,
-	})
-	rotl16Idx = archsimd.LoadInt8x32Array(&[32]int8{
-		2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13,
-		2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13,
-	})
-)
-
 // xorKeyStream is the amd64 SIMD backend hook. It XORs src with the key
 // stream generated from state and maintains leftover key stream state.
 //
 // The 256-bit AVX2 path is used when the CPU supports AVX2; otherwise the
 // portable scalar backend runs.
 func (cipher *CipherIetf) xorKeyStream(dst, src []byte) {
-	if archsimd.X86.AVX2() && len(src) >= 64 {
+	if archsimd.X86.AVX2() && len(src) > 64 {
 		cipher.xorKeyStreamAVX2(dst, src)
 	} else {
 		cipher.xorKeyStreamScalar(dst, src)
@@ -49,15 +35,27 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 	counter := cipher.state[12]
 
 	for len(src) >= 512 {
-		s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15 :=
+		w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
 			chacha8BlocksAVX2(&cipher.state, counter)
 
 		srcPointer := unsafe.Pointer(&src[0])
 		dstPointer := unsafe.Pointer(&dst[0])
-		xorStore8(dstPointer, srcPointer, 0, s0, s1, s2, s3)
-		xorStore8(dstPointer, srcPointer, 128, s4, s5, s6, s7)
-		xorStore8(dstPointer, srcPointer, 256, s8, s9, s10, s11)
-		xorStore8(dstPointer, srcPointer, 384, s12, s13, s14, s15)
+
+		// each transpose4AVX2 result r[b] holds words 4g..4g+3 of block b
+		// (low half) and block b+4 (high half)
+		a0, a1, a2, a3 := transpose4AVX2(w0, w1, w2, w3)     // words 0-3
+		b0, b1, b2, b3 := transpose4AVX2(w4, w5, w6, w7)     // words 4-7
+		c0, c1, c2, c3 := transpose4AVX2(w8, w9, w10, w11)   // words 8-11
+		d0, d1, d2, d3 := transpose4AVX2(w12, w13, w14, w15) // words 12-15
+
+		xorStoreBlock(dstPointer, srcPointer, 0, 0, 2, a0, b0, c0, d0)
+		xorStoreBlock(dstPointer, srcPointer, 64, 0, 2, a1, b1, c1, d1)
+		xorStoreBlock(dstPointer, srcPointer, 128, 0, 2, a2, b2, c2, d2)
+		xorStoreBlock(dstPointer, srcPointer, 192, 0, 2, a3, b3, c3, d3)
+		xorStoreBlock(dstPointer, srcPointer, 256, 1, 3, a0, b0, c0, d0)
+		xorStoreBlock(dstPointer, srcPointer, 320, 1, 3, a1, b1, c1, d1)
+		xorStoreBlock(dstPointer, srcPointer, 384, 1, 3, a2, b2, c2, d2)
+		xorStoreBlock(dstPointer, srcPointer, 448, 1, 3, a3, b3, c3, d3)
 
 		src = src[512:]
 		dst = dst[512:]
@@ -71,14 +69,23 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 	// partial block as leftover (<= 63).
 	if len(src) > 0 {
 		var keystream [512]byte
-		s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15 :=
+		w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
 			chacha8BlocksAVX2(&cipher.state, counter)
 
+		a0, a1, a2, a3 := transpose4AVX2(w0, w1, w2, w3)     // words 0-3
+		b0, b1, b2, b3 := transpose4AVX2(w4, w5, w6, w7)     // words 4-7
+		c0, c1, c2, c3 := transpose4AVX2(w8, w9, w10, w11)   // words 8-11
+		d0, d1, d2, d3 := transpose4AVX2(w12, w13, w14, w15) // words 12-15
+
 		ks := unsafe.Pointer(&keystream[0])
-		store8(ks, 0, s0, s1, s2, s3)
-		store8(ks, 128, s4, s5, s6, s7)
-		store8(ks, 256, s8, s9, s10, s11)
-		store8(ks, 384, s12, s13, s14, s15)
+		storeBlock(ks, 0, 0, 2, a0, b0, c0, d0)
+		storeBlock(ks, 64, 0, 2, a1, b1, c1, d1)
+		storeBlock(ks, 128, 0, 2, a2, b2, c2, d2)
+		storeBlock(ks, 192, 0, 2, a3, b3, c3, d3)
+		storeBlock(ks, 256, 1, 3, a0, b0, c0, d0)
+		storeBlock(ks, 320, 1, 3, a1, b1, c1, d1)
+		storeBlock(ks, 384, 1, 3, a2, b2, c2, d2)
+		storeBlock(ks, 448, 1, 3, a3, b3, c3, d3)
 
 		n := len(src)
 		subtle.XORBytes(dst, src, keystream[:n])
@@ -96,116 +103,79 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 	cipher.leftoverLen = 0
 }
 
+// counterVec returns the block counter vector for the 8 lanes: lane i holds
+// counter+i.
+func counterVec(counter uint32) archsimd.Uint32x8 {
+	return archsimd.LoadUint32x8Array(&[8]uint32{counter, counter + 1, counter + 2, counter + 3, counter + 4, counter + 5, counter + 6, counter + 7})
+}
+
 // chacha8BlocksAVX2 computes 8 blocks of ChaCha20 key stream for the given
-// counter (20 rounds + add-back) and returns them in the AVX2 row layout:
-// register v[4g+j] holds row j (words 4j..4j+3) of blocks 2g (low 128-bit
-// half) and 2g+1 (high 128-bit half), for g in 0..3.
+// counter (20 rounds + add-back) and returns them in the word-major layout:
+// register wi holds word i of the 8 blocks, one block per lane.
 //
-// The layout matches crypto/chacha/chachaAVX2_amd64.s. The 16 initial-state
-// vectors are not kept live through the rounds (16 working registers plus the
-// two rotation constants already exceed the 16 YMM registers); instead the
-// initial rows are reloaded from state right at the add-back.
-func chacha8BlocksAVX2(state *[16]uint32, counter uint32) (v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15 archsimd.Uint32x8) {
-	lo := archsimd.LoadUint32x8Array((*[8]uint32)(unsafe.Pointer(&state[0])))
-	hi := archsimd.LoadUint32x8Array((*[8]uint32)(unsafe.Pointer(&state[8])))
-	row0 := lo.ConcatPermute128Scalars(0, 0, lo)
-	row1 := lo.ConcatPermute128Scalars(1, 1, lo)
-	row2 := hi.ConcatPermute128Scalars(0, 0, hi)
-	n0, n1, n2 := state[13], state[14], state[15]
-
-	row3a := archsimd.LoadUint32x8Array(&[8]uint32{counter, n0, n1, n2, counter + 1, n0, n1, n2})
-	row3b := archsimd.LoadUint32x8Array(&[8]uint32{counter + 2, n0, n1, n2, counter + 3, n0, n1, n2})
-	row3c := archsimd.LoadUint32x8Array(&[8]uint32{counter + 4, n0, n1, n2, counter + 5, n0, n1, n2})
-	row3d := archsimd.LoadUint32x8Array(&[8]uint32{counter + 6, n0, n1, n2, counter + 7, n0, n1, n2})
-
-	v0, v1, v2, v3 = row0, row1, row2, row3a
-	v4, v5, v6, v7 = row0, row1, row2, row3b
-	v8, v9, v10, v11 = row0, row1, row2, row3c
-	v12, v13, v14, v15 = row0, row1, row2, row3d
+// The initial state is rebuilt right at the add-back (constant reload) so the
+// round loop only keeps the 16 working registers live.
+func chacha8BlocksAVX2(state *[16]uint32, counter uint32) (w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 archsimd.Uint32x8) {
+	// working state: word-major broadcasts of the initial state
+	w0 = archsimd.BroadcastUint32x8(state[0])
+	w1 = archsimd.BroadcastUint32x8(state[1])
+	w2 = archsimd.BroadcastUint32x8(state[2])
+	w3 = archsimd.BroadcastUint32x8(state[3])
+	w4 = archsimd.BroadcastUint32x8(state[4])
+	w5 = archsimd.BroadcastUint32x8(state[5])
+	w6 = archsimd.BroadcastUint32x8(state[6])
+	w7 = archsimd.BroadcastUint32x8(state[7])
+	w8 = archsimd.BroadcastUint32x8(state[8])
+	w9 = archsimd.BroadcastUint32x8(state[9])
+	w10 = archsimd.BroadcastUint32x8(state[10])
+	w11 = archsimd.BroadcastUint32x8(state[11])
+	w12 = counterVec(counter)
+	w13 = archsimd.BroadcastUint32x8(state[13])
+	w14 = archsimd.BroadcastUint32x8(state[14])
+	w15 = archsimd.BroadcastUint32x8(state[15])
 
 	for r := 0; r < 10; r++ {
-		// column round
-		v0, v1, v2, v3 = quarterRoundAVX2(v0, v1, v2, v3)
-		v4, v5, v6, v7 = quarterRoundAVX2(v4, v5, v6, v7)
-		v8, v9, v10, v11 = quarterRoundAVX2(v8, v9, v10, v11)
-		v12, v13, v14, v15 = quarterRoundAVX2(v12, v13, v14, v15)
+		w0, w4, w8, w12 = quarterRoundAVX2(w0, w4, w8, w12)
+		w1, w5, w9, w13 = quarterRoundAVX2(w1, w5, w9, w13)
+		w2, w6, w10, w14 = quarterRoundAVX2(w2, w6, w10, w14)
+		w3, w7, w11, w15 = quarterRoundAVX2(w3, w7, w11, w15)
 
-		// rotate rows so the columns become the diagonals
-		v1 = v1.PermuteScalarsGrouped(1, 2, 3, 0)
-		v2 = v2.PermuteScalarsGrouped(2, 3, 0, 1)
-		v3 = v3.PermuteScalarsGrouped(3, 0, 1, 2)
-		v5 = v5.PermuteScalarsGrouped(1, 2, 3, 0)
-		v6 = v6.PermuteScalarsGrouped(2, 3, 0, 1)
-		v7 = v7.PermuteScalarsGrouped(3, 0, 1, 2)
-		v9 = v9.PermuteScalarsGrouped(1, 2, 3, 0)
-		v10 = v10.PermuteScalarsGrouped(2, 3, 0, 1)
-		v11 = v11.PermuteScalarsGrouped(3, 0, 1, 2)
-		v13 = v13.PermuteScalarsGrouped(1, 2, 3, 0)
-		v14 = v14.PermuteScalarsGrouped(2, 3, 0, 1)
-		v15 = v15.PermuteScalarsGrouped(3, 0, 1, 2)
-
-		// diagonal round
-		v0, v1, v2, v3 = quarterRoundAVX2(v0, v1, v2, v3)
-		v4, v5, v6, v7 = quarterRoundAVX2(v4, v5, v6, v7)
-		v8, v9, v10, v11 = quarterRoundAVX2(v8, v9, v10, v11)
-		v12, v13, v14, v15 = quarterRoundAVX2(v12, v13, v14, v15)
-
-		// inverse row rotation
-		v1 = v1.PermuteScalarsGrouped(3, 0, 1, 2)
-		v2 = v2.PermuteScalarsGrouped(2, 3, 0, 1)
-		v3 = v3.PermuteScalarsGrouped(1, 2, 3, 0)
-		v5 = v5.PermuteScalarsGrouped(3, 0, 1, 2)
-		v6 = v6.PermuteScalarsGrouped(2, 3, 0, 1)
-		v7 = v7.PermuteScalarsGrouped(1, 2, 3, 0)
-		v9 = v9.PermuteScalarsGrouped(3, 0, 1, 2)
-		v10 = v10.PermuteScalarsGrouped(2, 3, 0, 1)
-		v11 = v11.PermuteScalarsGrouped(1, 2, 3, 0)
-		v13 = v13.PermuteScalarsGrouped(3, 0, 1, 2)
-		v14 = v14.PermuteScalarsGrouped(2, 3, 0, 1)
-		v15 = v15.PermuteScalarsGrouped(1, 2, 3, 0)
+		w0, w5, w10, w15 = quarterRoundAVX2(w0, w5, w10, w15)
+		w1, w6, w11, w12 = quarterRoundAVX2(w1, w6, w11, w12)
+		w2, w7, w8, w13 = quarterRoundAVX2(w2, w7, w8, w13)
+		w3, w4, w9, w14 = quarterRoundAVX2(w3, w4, w9, w14)
 	}
 
-	// add-back: reload the initial rows here (constant reload) so the round
-	// loop only keeps the 16 working registers and the two rotation constants
-	// live.
-	lo = archsimd.LoadUint32x8Array((*[8]uint32)(unsafe.Pointer(&state[0])))
-	hi = archsimd.LoadUint32x8Array((*[8]uint32)(unsafe.Pointer(&state[8])))
-	row0 = lo.ConcatPermute128Scalars(0, 0, lo)
-	row1 = lo.ConcatPermute128Scalars(1, 1, lo)
-	row2 = hi.ConcatPermute128Scalars(0, 0, hi)
-	row3a = archsimd.LoadUint32x8Array(&[8]uint32{counter, n0, n1, n2, counter + 1, n0, n1, n2})
-	row3b = archsimd.LoadUint32x8Array(&[8]uint32{counter + 2, n0, n1, n2, counter + 3, n0, n1, n2})
-	row3c = archsimd.LoadUint32x8Array(&[8]uint32{counter + 4, n0, n1, n2, counter + 5, n0, n1, n2})
-	row3d = archsimd.LoadUint32x8Array(&[8]uint32{counter + 6, n0, n1, n2, counter + 7, n0, n1, n2})
-
-	v0 = v0.Add(row0)
-	v1 = v1.Add(row1)
-	v2 = v2.Add(row2)
-	v3 = v3.Add(row3a)
-	v4 = v4.Add(row0)
-	v5 = v5.Add(row1)
-	v6 = v6.Add(row2)
-	v7 = v7.Add(row3b)
-	v8 = v8.Add(row0)
-	v9 = v9.Add(row1)
-	v10 = v10.Add(row2)
-	v11 = v11.Add(row3c)
-	v12 = v12.Add(row0)
-	v13 = v13.Add(row1)
-	v14 = v14.Add(row2)
-	v15 = v15.Add(row3d)
+	// add-back: reload the initial state (constant reload)
+	w0 = w0.Add(archsimd.BroadcastUint32x8(state[0]))
+	w1 = w1.Add(archsimd.BroadcastUint32x8(state[1]))
+	w2 = w2.Add(archsimd.BroadcastUint32x8(state[2]))
+	w3 = w3.Add(archsimd.BroadcastUint32x8(state[3]))
+	w4 = w4.Add(archsimd.BroadcastUint32x8(state[4]))
+	w5 = w5.Add(archsimd.BroadcastUint32x8(state[5]))
+	w6 = w6.Add(archsimd.BroadcastUint32x8(state[6]))
+	w7 = w7.Add(archsimd.BroadcastUint32x8(state[7]))
+	w8 = w8.Add(archsimd.BroadcastUint32x8(state[8]))
+	w9 = w9.Add(archsimd.BroadcastUint32x8(state[9]))
+	w10 = w10.Add(archsimd.BroadcastUint32x8(state[10]))
+	w11 = w11.Add(archsimd.BroadcastUint32x8(state[11]))
+	w12 = w12.Add(counterVec(counter))
+	w13 = w13.Add(archsimd.BroadcastUint32x8(state[13]))
+	w14 = w14.Add(archsimd.BroadcastUint32x8(state[14]))
+	w15 = w15.Add(archsimd.BroadcastUint32x8(state[15]))
 	return
 }
 
-// quarterRoundAVX2 is the ChaCha20 quarter round on the AVX2 row layout.
-// The 16- and 8-bit rotations use VPSHUFB (single instruction); the 12- and
-// 7-bit rotations use two shifts and an or, the fastest AVX2 option (there is
-// no single-instruction 32-bit rotate before AVX512).
+// quarterRoundAVX2 is the ChaCha20 quarter round on the word-major layout.
+// All rotations use two shifts and an or with immediate counts, which on AVX2
+// is the fastest option that needs no extra vector register (VPSHUFB would
+// require two shuffle-index registers, pushing the live set past the 16 YMM
+// registers; there is no single-instruction 32-bit rotate before AVX512).
 func quarterRoundAVX2(a, b, c, d archsimd.Uint32x8) (archsimd.Uint32x8, archsimd.Uint32x8, archsimd.Uint32x8, archsimd.Uint32x8) {
 	// a += b; d ^= a; d <<<= 16
 	a = a.Add(b)
 	d = d.Xor(a)
-	d = d.ReshapeToUint8s().PermuteOrZeroGrouped(rotl16Idx).ReshapeToUint32s()
+	d = d.ShiftAllLeft(16).Or(d.ShiftAllRight(16))
 
 	// c += d; b ^= c; b <<<= 12
 	c = c.Add(d)
@@ -215,7 +185,7 @@ func quarterRoundAVX2(a, b, c, d archsimd.Uint32x8) (archsimd.Uint32x8, archsimd
 	// a += b; d ^= a; d <<<= 8
 	a = a.Add(b)
 	d = d.Xor(a)
-	d = d.ReshapeToUint8s().PermuteOrZeroGrouped(rotl8Idx).ReshapeToUint32s()
+	d = d.ShiftAllLeft(8).Or(d.ShiftAllRight(24))
 
 	// c += d; b ^= c; b <<<= 7
 	c = c.Add(d)
@@ -225,41 +195,44 @@ func quarterRoundAVX2(a, b, c, d archsimd.Uint32x8) (archsimd.Uint32x8, archsimd
 	return a, b, c, d
 }
 
-// xorStore8 XORs 128 bytes of key stream (2 blocks held in the row vectors of
-// one group) with src[off:off+128] and stores the result into
-// dst[off:off+128]. The two blocks of the group are de-interleaved from the
-// 128-bit halves with VPERM2I128.
-func xorStore8(dst, src unsafe.Pointer, off int, v0, v1, v2, v3 archsimd.Uint32x8) {
-	// block 2g, bytes 0..31 (rows 0-1)
-	t := v0.ConcatPermute128Scalars(0, 2, v1)
+// transpose4AVX2 transposes one word group of 4 word-major vectors (each
+// holding word i of the 8 blocks, one block per lane) into 4 vectors holding
+// 4 consecutive words of each block. r[b] holds words of block b (low 128-bit
+// half) and block b+4 (high 128-bit half), for b in 0..3. The transpose is
+// performed within each 128-bit lane, so it handles blocks 0-3 and 4-7 at
+// once.
+func transpose4AVX2(a, b, c, d archsimd.Uint32x8) (archsimd.Uint32x8, archsimd.Uint32x8, archsimd.Uint32x8, archsimd.Uint32x8) {
+	t0 := a.InterleaveLoGrouped(b) // [a0 b0 a1 b1 | a4 b4 a5 b5]
+	t1 := a.InterleaveHiGrouped(b) // [a2 b2 a3 b3 | a6 b6 a7 b7]
+	t2 := c.InterleaveLoGrouped(d) // [c0 d0 c1 d1 | c4 d4 c5 d5]
+	t3 := c.InterleaveHiGrouped(d) // [c2 d2 c3 d3 | c6 d6 c7 d7]
+	return t0.ConcatPermuteScalarsGrouped(0, 1, 4, 5, t2),
+		t0.ConcatPermuteScalarsGrouped(2, 3, 6, 7, t2),
+		t1.ConcatPermuteScalarsGrouped(0, 1, 4, 5, t3),
+		t1.ConcatPermuteScalarsGrouped(2, 3, 6, 7, t3)
+}
+
+// xorStoreBlock XORs 64 bytes of key stream (one block, whose words are held
+// in the four transposed vectors r0..r3, selecting the low or high 128-bit
+// halves with sel0/sel1 = 0,2 or 1,3) with src[off:off+64] and stores the
+// result into dst[off:off+64].
+func xorStoreBlock(dst, src unsafe.Pointer, off int, sel0, sel1 uint8, r0, r1, r2, r3 archsimd.Uint32x8) {
+	t := r0.ConcatPermute128Scalars(sel0, sel1, r1)
 	t = t.Xor(archsimd.LoadUint32x8Array((*[8]uint32)(unsafe.Add(src, off))))
 	t.StoreArray((*[8]uint32)(unsafe.Add(dst, off)))
 
-	// block 2g, bytes 32..63 (rows 2-3)
-	t = v2.ConcatPermute128Scalars(0, 2, v3)
+	t = r2.ConcatPermute128Scalars(sel0, sel1, r3)
 	t = t.Xor(archsimd.LoadUint32x8Array((*[8]uint32)(unsafe.Add(src, off+32))))
 	t.StoreArray((*[8]uint32)(unsafe.Add(dst, off+32)))
-
-	// block 2g+1, bytes 0..31
-	t = v0.ConcatPermute128Scalars(1, 3, v1)
-	t = t.Xor(archsimd.LoadUint32x8Array((*[8]uint32)(unsafe.Add(src, off+64))))
-	t.StoreArray((*[8]uint32)(unsafe.Add(dst, off+64)))
-
-	// block 2g+1, bytes 32..63
-	t = v2.ConcatPermute128Scalars(1, 3, v3)
-	t = t.Xor(archsimd.LoadUint32x8Array((*[8]uint32)(unsafe.Add(src, off+96))))
-	t.StoreArray((*[8]uint32)(unsafe.Add(dst, off+96)))
 }
 
-// store8 stores 128 bytes of key stream held in the row vectors of one group
-// into ks[off:off+128] in block-major order.
-func store8(ks unsafe.Pointer, off int, v0, v1, v2, v3 archsimd.Uint32x8) {
-	t := v0.ConcatPermute128Scalars(0, 2, v1)
+// storeBlock stores 64 bytes of key stream (one block, held in the four
+// transposed vectors r0..r3, selecting the low or high 128-bit halves with
+// sel0/sel1 = 0,2 or 1,3) into ks[off:off+64].
+func storeBlock(ks unsafe.Pointer, off int, sel0, sel1 uint8, r0, r1, r2, r3 archsimd.Uint32x8) {
+	t := r0.ConcatPermute128Scalars(sel0, sel1, r1)
 	t.StoreArray((*[8]uint32)(unsafe.Add(ks, off)))
-	t = v2.ConcatPermute128Scalars(0, 2, v3)
+
+	t = r2.ConcatPermute128Scalars(sel0, sel1, r3)
 	t.StoreArray((*[8]uint32)(unsafe.Add(ks, off+32)))
-	t = v0.ConcatPermute128Scalars(1, 3, v1)
-	t.StoreArray((*[8]uint32)(unsafe.Add(ks, off+64)))
-	t = v2.ConcatPermute128Scalars(1, 3, v3)
-	t.StoreArray((*[8]uint32)(unsafe.Add(ks, off+96)))
 }

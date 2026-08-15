@@ -21,7 +21,7 @@ var (
 // xorKeyStream is the arm64 SIMD backend hook. It XORs src with the key
 // stream generated from state and maintains leftover key stream state.
 func (cipher *CipherIetf) xorKeyStream(dst, src []byte) {
-	if len(src) >= 64 {
+	if len(src) > 64 {
 		cipher.xorKeyStreamNeon(dst, src)
 	} else {
 		cipher.xorKeyStreamScalar(dst, src)
