@@ -105,6 +105,22 @@ func simQuarterRound(a, b, c, d simReg) (simReg, simReg, simReg, simReg) {
 	return a, b, c, d
 }
 
+// simConcat128 implements Uint32x8.ConcatPermute128Scalars: the 256-bit
+// vectors x and y are treated as four 128-bit elements [x.lo, x.hi, y.lo,
+// y.hi]; the result is the concatenation [elem[lo], elem[hi]].
+func simConcat128(x, y simReg, lo, hi uint8) simReg {
+	elem := [4][4]uint32{
+		{x[0], x[1], x[2], x[3]},
+		{x[4], x[5], x[6], x[7]},
+		{y[0], y[1], y[2], y[3]},
+		{y[4], y[5], y[6], y[7]},
+	}
+	var r simReg
+	copy(r[:4], elem[lo][:])
+	copy(r[4:], elem[hi][:])
+	return r
+}
+
 // simChacha8Blocks simulates chacha8BlocksAVX2 and returns the 8 64-byte
 // blocks in block-major order.
 func simChacha8Blocks(state [16]uint32, counter uint32) [8][16]uint32 {
@@ -113,9 +129,9 @@ func simChacha8Blocks(state [16]uint32, counter uint32) [8][16]uint32 {
 		lo[i] = state[i]
 		hi[i] = state[8+i]
 	}
-	row0 := simReg{lo[0], lo[1], lo[2], lo[3], lo[0], lo[1], lo[2], lo[3]}
-	row1 := simReg{lo[4], lo[5], lo[6], lo[7], lo[4], lo[5], lo[6], lo[7]}
-	row2 := simReg{hi[0], hi[1], hi[2], hi[3], hi[0], hi[1], hi[2], hi[3]}
+	row0 := simConcat128(lo, lo, 0, 0)
+	row1 := simConcat128(lo, lo, 1, 1)
+	row2 := simConcat128(hi, hi, 0, 0)
 	row3 := func(g uint32) simReg {
 		return simReg{counter + 2*g, hi[5], hi[6], hi[7], counter + 2*g + 1, hi[5], hi[6], hi[7]}
 	}
@@ -153,15 +169,19 @@ func simChacha8Blocks(state [16]uint32, counter uint32) [8][16]uint32 {
 		g[i][3] = simAdd(g[i][3], row3(uint32(i)))
 	}
 
+	// de-interleave each group into its two blocks, using the same
+	// ConcatPermute128Scalars arguments as store8/xorStore8.
 	var blocks [8][16]uint32
 	for gid := 0; gid < 4; gid++ {
-		// block 2*gid: low halves, block 2*gid+1: high halves
-		for r := 0; r < 4; r++ {
-			for w := 0; w < 4; w++ {
-				blocks[2*gid][4*r+w] = g[gid][r][w]
-				blocks[2*gid+1][4*r+w] = g[gid][r][4+w]
-			}
-		}
+		v0, v1, v2, v3 := g[gid][0], g[gid][1], g[gid][2], g[gid][3]
+		c0 := simConcat128(v0, v1, 0, 2) // block 2g rows 0-1 (words 0-7)
+		c1 := simConcat128(v2, v3, 0, 2) // block 2g rows 2-3 (words 8-15)
+		c2 := simConcat128(v0, v1, 1, 3) // block 2g+1 rows 0-1 (words 0-7)
+		c3 := simConcat128(v2, v3, 1, 3) // block 2g+1 rows 2-3 (words 8-15)
+		copy(blocks[2*gid][0:8], c0[:])
+		copy(blocks[2*gid][8:16], c1[:])
+		copy(blocks[2*gid+1][0:8], c2[:])
+		copy(blocks[2*gid+1][8:16], c3[:])
 	}
 	return blocks
 }

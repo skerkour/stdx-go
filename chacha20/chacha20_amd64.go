@@ -231,22 +231,22 @@ func quarterRoundAVX2(a, b, c, d archsimd.Uint32x8) (archsimd.Uint32x8, archsimd
 // 128-bit halves with VPERM2I128.
 func xorStore8(dst, src unsafe.Pointer, off int, v0, v1, v2, v3 archsimd.Uint32x8) {
 	// block 2g, bytes 0..31 (rows 0-1)
-	t := v0.ConcatPermute128Scalars(0, 0, v1)
+	t := v0.ConcatPermute128Scalars(0, 2, v1)
 	t = t.Xor(archsimd.LoadUint32x8Array((*[8]uint32)(unsafe.Add(src, off))))
 	t.StoreArray((*[8]uint32)(unsafe.Add(dst, off)))
 
 	// block 2g, bytes 32..63 (rows 2-3)
-	t = v2.ConcatPermute128Scalars(0, 0, v3)
+	t = v2.ConcatPermute128Scalars(0, 2, v3)
 	t = t.Xor(archsimd.LoadUint32x8Array((*[8]uint32)(unsafe.Add(src, off+32))))
 	t.StoreArray((*[8]uint32)(unsafe.Add(dst, off+32)))
 
 	// block 2g+1, bytes 0..31
-	t = v0.ConcatPermute128Scalars(1, 1, v1)
+	t = v0.ConcatPermute128Scalars(1, 3, v1)
 	t = t.Xor(archsimd.LoadUint32x8Array((*[8]uint32)(unsafe.Add(src, off+64))))
 	t.StoreArray((*[8]uint32)(unsafe.Add(dst, off+64)))
 
 	// block 2g+1, bytes 32..63
-	t = v2.ConcatPermute128Scalars(1, 1, v3)
+	t = v2.ConcatPermute128Scalars(1, 3, v3)
 	t = t.Xor(archsimd.LoadUint32x8Array((*[8]uint32)(unsafe.Add(src, off+96))))
 	t.StoreArray((*[8]uint32)(unsafe.Add(dst, off+96)))
 }
@@ -254,12 +254,12 @@ func xorStore8(dst, src unsafe.Pointer, off int, v0, v1, v2, v3 archsimd.Uint32x
 // store8 stores 128 bytes of key stream held in the row vectors of one group
 // into ks[off:off+128] in block-major order.
 func store8(ks unsafe.Pointer, off int, v0, v1, v2, v3 archsimd.Uint32x8) {
-	t := v0.ConcatPermute128Scalars(0, 0, v1)
+	t := v0.ConcatPermute128Scalars(0, 2, v1)
 	t.StoreArray((*[8]uint32)(unsafe.Add(ks, off)))
-	t = v2.ConcatPermute128Scalars(0, 0, v3)
+	t = v2.ConcatPermute128Scalars(0, 2, v3)
 	t.StoreArray((*[8]uint32)(unsafe.Add(ks, off+32)))
-	t = v0.ConcatPermute128Scalars(1, 1, v1)
+	t = v0.ConcatPermute128Scalars(1, 3, v1)
 	t.StoreArray((*[8]uint32)(unsafe.Add(ks, off+64)))
-	t = v2.ConcatPermute128Scalars(1, 1, v3)
+	t = v2.ConcatPermute128Scalars(1, 3, v3)
 	t.StoreArray((*[8]uint32)(unsafe.Add(ks, off+96)))
 }
