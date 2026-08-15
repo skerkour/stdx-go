@@ -1,0 +1,37 @@
+name: chacha20
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - amd64
+          - arm64
+
+    env:
+      GOEXPERIMENT: simd
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v6.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Vet
+        run: go vet ./chacha20/
+
+      - name: Test
+        run: go test -count=1 ./chacha20/
+
+      - name: Benchmark
+        run: go test -bench=BenchmarkChaCha20 -benchmem -run=^$ -count=1 ./chacha20/
