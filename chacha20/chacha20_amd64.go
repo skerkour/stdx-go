@@ -30,13 +30,31 @@ func (cipher *CipherIetf) xorKeyStream(dst, src []byte) {
 // multiple of 512 bytes, the final iteration produces the tail and any unused
 // key stream of the last partial block is retained.
 func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
-	// counter is tracked as a scalar; chacha8BlocksAVX2 rebuilds the vector
-	// layout from cipher.state on demand.
-	counter := cipher.state[12]
+	// counter is kept as an 8-lane SIMD vector [c..c+7] and advanced in SIMD
+	// per iteration, mirroring the arm64 backend.'
+	counterIncrement := archsimd.BroadcastUint32x8(8)
+	counter := archsimd.BroadcastUint32x8(cipher.state[12]).Add(archsimd.LoadUint32x8Array(&[8]uint32{0, 1, 2, 3, 4, 5, 6, 7}))
+
+	// initial state
+	i0 := archsimd.BroadcastUint32x8(cipher.state[0])
+	i1 := archsimd.BroadcastUint32x8(cipher.state[1])
+	i2 := archsimd.BroadcastUint32x8(cipher.state[2])
+	i3 := archsimd.BroadcastUint32x8(cipher.state[3])
+	i4 := archsimd.BroadcastUint32x8(cipher.state[4])
+	i5 := archsimd.BroadcastUint32x8(cipher.state[5])
+	i6 := archsimd.BroadcastUint32x8(cipher.state[6])
+	i7 := archsimd.BroadcastUint32x8(cipher.state[7])
+	i8 := archsimd.BroadcastUint32x8(cipher.state[8])
+	i9 := archsimd.BroadcastUint32x8(cipher.state[9])
+	i10 := archsimd.BroadcastUint32x8(cipher.state[10])
+	i11 := archsimd.BroadcastUint32x8(cipher.state[11])
+	i13 := archsimd.BroadcastUint32x8(cipher.state[13])
+	i14 := archsimd.BroadcastUint32x8(cipher.state[14])
+	i15 := archsimd.BroadcastUint32x8(cipher.state[15])
 
 	for len(src) >= 512 {
 		w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
-			chacha8BlocksAVX2(&cipher.state, counter)
+			chacha8BlocksAVX2(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, counter, i13, i14, i15)
 
 		srcPointer := unsafe.Pointer(&src[0])
 		dstPointer := unsafe.Pointer(&dst[0])
@@ -59,10 +77,10 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 
 		src = src[512:]
 		dst = dst[512:]
-		counter += 8
+		counter = counter.Add(counterIncrement)
 	}
 
-	cipher.state[12] = counter
+	cipher.state[12] = counter.GetLo().GetElem(0)
 
 	// Tail: < 512 bytes. Generate 8 blocks of key stream into a local
 	// buffer, XOR the consumed part, and keep the unused bytes of the last
@@ -70,7 +88,7 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 	if len(src) > 0 {
 		var keystream [512]byte
 		w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
-			chacha8BlocksAVX2(&cipher.state, counter)
+			chacha8BlocksAVX2(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, counter, i13, i14, i15)
 
 		a0, a1, a2, a3 := transpose4AVX2(w0, w1, w2, w3)     // words 0-3
 		b0, b1, b2, b3 := transpose4AVX2(w4, w5, w6, w7)     // words 4-7
@@ -100,39 +118,20 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 			return
 		}
 	}
+
 	cipher.leftoverLen = 0
 }
 
-// counterVec returns the block counter vector for the 8 lanes: lane i holds
-// counter+i.
-func counterVec(counter uint32) archsimd.Uint32x8 {
-	return archsimd.LoadUint32x8Array(&[8]uint32{counter, counter + 1, counter + 2, counter + 3, counter + 4, counter + 5, counter + 6, counter + 7})
-}
-
-// chacha8BlocksAVX2 computes 8 blocks of ChaCha20 key stream for the given
-// counter (20 rounds + add-back) and returns them in the word-major layout:
-// register wi holds word i of the 8 blocks, one block per lane.
+// chacha8BlocksAVX2 computes 8 blocks of ChaCha20 key stream (20 rounds +
+// add-back) and returns them in the word-major layout: register wi holds word
+// i of the 8 blocks, one block per lane.
 //
-// The initial state is rebuilt right at the add-back (constant reload) so the
-// round loop only keeps the 16 working registers live.
-func chacha8BlocksAVX2(state *[16]uint32, counter uint32) (w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 archsimd.Uint32x8) {
-	// working state: word-major broadcasts of the initial state
-	w0 = archsimd.BroadcastUint32x8(state[0])
-	w1 = archsimd.BroadcastUint32x8(state[1])
-	w2 = archsimd.BroadcastUint32x8(state[2])
-	w3 = archsimd.BroadcastUint32x8(state[3])
-	w4 = archsimd.BroadcastUint32x8(state[4])
-	w5 = archsimd.BroadcastUint32x8(state[5])
-	w6 = archsimd.BroadcastUint32x8(state[6])
-	w7 = archsimd.BroadcastUint32x8(state[7])
-	w8 = archsimd.BroadcastUint32x8(state[8])
-	w9 = archsimd.BroadcastUint32x8(state[9])
-	w10 = archsimd.BroadcastUint32x8(state[10])
-	w11 = archsimd.BroadcastUint32x8(state[11])
-	w12 = counterVec(counter)
-	w13 = archsimd.BroadcastUint32x8(state[13])
-	w14 = archsimd.BroadcastUint32x8(state[14])
-	w15 = archsimd.BroadcastUint32x8(state[15])
+// The 16 initial-state vectors are passed in and the compiler keeps them in the stack frame across the round
+// loop and reloads them at the add-back.
+func chacha8BlocksAVX2(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i13, i14, i15 archsimd.Uint32x8) (w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 archsimd.Uint32x8) {
+	// working state: the initial state, to be transformed by the rounds
+	w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 =
+		i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i13, i14, i15
 
 	for r := 0; r < 10; r++ {
 		w0, w4, w8, w12 = quarterRoundAVX2(w0, w4, w8, w12)
@@ -146,31 +145,32 @@ func chacha8BlocksAVX2(state *[16]uint32, counter uint32) (w0, w1, w2, w3, w4, w
 		w3, w4, w9, w14 = quarterRoundAVX2(w3, w4, w9, w14)
 	}
 
-	// add-back: reload the initial state (constant reload)
-	w0 = w0.Add(archsimd.BroadcastUint32x8(state[0]))
-	w1 = w1.Add(archsimd.BroadcastUint32x8(state[1]))
-	w2 = w2.Add(archsimd.BroadcastUint32x8(state[2]))
-	w3 = w3.Add(archsimd.BroadcastUint32x8(state[3]))
-	w4 = w4.Add(archsimd.BroadcastUint32x8(state[4]))
-	w5 = w5.Add(archsimd.BroadcastUint32x8(state[5]))
-	w6 = w6.Add(archsimd.BroadcastUint32x8(state[6]))
-	w7 = w7.Add(archsimd.BroadcastUint32x8(state[7]))
-	w8 = w8.Add(archsimd.BroadcastUint32x8(state[8]))
-	w9 = w9.Add(archsimd.BroadcastUint32x8(state[9]))
-	w10 = w10.Add(archsimd.BroadcastUint32x8(state[10]))
-	w11 = w11.Add(archsimd.BroadcastUint32x8(state[11]))
-	w12 = w12.Add(counterVec(counter))
-	w13 = w13.Add(archsimd.BroadcastUint32x8(state[13]))
-	w14 = w14.Add(archsimd.BroadcastUint32x8(state[14]))
-	w15 = w15.Add(archsimd.BroadcastUint32x8(state[15]))
+	// add-back
+	w0 = w0.Add(i0)
+	w1 = w1.Add(i1)
+	w2 = w2.Add(i2)
+	w3 = w3.Add(i3)
+	w4 = w4.Add(i4)
+	w5 = w5.Add(i5)
+	w6 = w6.Add(i6)
+	w7 = w7.Add(i7)
+	w8 = w8.Add(i8)
+	w9 = w9.Add(i9)
+	w10 = w10.Add(i10)
+	w11 = w11.Add(i11)
+	w12 = w12.Add(i12)
+	w13 = w13.Add(i13)
+	w14 = w14.Add(i14)
+	w15 = w15.Add(i15)
 	return
 }
 
 // quarterRoundAVX2 is the ChaCha20 quarter round on the word-major layout.
 // All rotations use two shifts and an or with immediate counts, which on AVX2
 // is the fastest option that needs no extra vector register (VPSHUFB would
-// require two shuffle-index registers, pushing the live set past the 16 YMM
-// registers; there is no single-instruction 32-bit rotate before AVX512).
+// require shuffle-index registers or per-use loads, both of which measurably
+// increase round-loop register pressure; there is no single-instruction
+// 32-bit rotate before AVX512).
 func quarterRoundAVX2(a, b, c, d archsimd.Uint32x8) (archsimd.Uint32x8, archsimd.Uint32x8, archsimd.Uint32x8, archsimd.Uint32x8) {
 	// a += b; d ^= a; d <<<= 16
 	a = a.Add(b)

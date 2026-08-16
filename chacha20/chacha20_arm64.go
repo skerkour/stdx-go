@@ -61,7 +61,7 @@ func (cipher *CipherIetf) xorKeyStreamNeon(dst, src []byte) {
 
 	for len(src) >= 256 {
 		w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
-			chacha4BlocksNeon(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i13, i14, i15, counter)
+			chacha4BlocksNeon(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, counter, i13, i14, i15)
 
 		srcPointer := unsafe.Pointer(&src[0])
 		dstPointer := unsafe.Pointer(&dst[0])
@@ -100,7 +100,7 @@ func (cipher *CipherIetf) xorKeyStreamNeon(dst, src []byte) {
 	if len(src) > 0 {
 		var keystream [256]byte
 		w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
-			chacha4BlocksNeon(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i13, i14, i15, counter)
+			chacha4BlocksNeon(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, counter, i13, i14, i15)
 
 		// block-major layout: block b words 4g..4g+3 at ks[b*64+g*16]
 		w0.ReshapeToUint8s().Store(keystream[0:16])
@@ -143,9 +143,9 @@ func (cipher *CipherIetf) xorKeyStreamNeon(dst, src []byte) {
 // counter (20 rounds + add-back) and transposes them into 16 block-major
 // vectors. a[4g+b] holds words 4g..4g+3 of block b (b,g in 0..3), so block b's
 // bytes are a[0*4+b], a[1*4+b], a[2*4+b], a[3*4+b] at byte offsets b*64+{0,16,32,48}.
-func chacha4BlocksNeon(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i13, i14, i15, counter archsimd.Uint32x4) (w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 archsimd.Uint32x4) {
+func chacha4BlocksNeon(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i13, i14, i15 archsimd.Uint32x4) (w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 archsimd.Uint32x4) {
 	w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 =
-		i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, counter, i13, i14, i15
+		i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i13, i14, i15
 
 	for r := 0; r < 10; r++ {
 		w0, w4, w8, w12 = quarterRoundNeon(w0, w4, w8, w12)
@@ -171,7 +171,7 @@ func chacha4BlocksNeon(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i13, i1
 	w9 = w9.Add(i9)
 	w10 = w10.Add(i10)
 	w11 = w11.Add(i11)
-	w12 = w12.Add(counter)
+	w12 = w12.Add(i12)
 	w13 = w13.Add(i13)
 	w14 = w14.Add(i14)
 	w15 = w15.Add(i15)
