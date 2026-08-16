@@ -59,7 +59,8 @@ func (cipher *CipherIetf) xorKeyStreamNeon(dst, src []byte) {
 	counterIncrement := archsimd.BroadcastUint32x4(4)
 	counter := archsimd.LoadUint32x4Array(&[4]uint32{cipher.state[12] + 0, cipher.state[12] + 1, cipher.state[12] + 2, cipher.state[12] + 3})
 
-	for len(src) >= 256 {
+	// len(dst) is not needed but it removes bound checks
+	for len(src) >= 256 && len(dst) >= 256 {
 		w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
 			chacha4BlocksNeon(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, counter, i13, i14, i15)
 
@@ -123,14 +124,13 @@ func (cipher *CipherIetf) xorKeyStreamNeon(dst, src []byte) {
 		w14.ReshapeToUint8s().Store(keystream[176:192])
 		w15.ReshapeToUint8s().Store(keystream[240:256])
 
-		n := len(src)
+		n := min(len(src), 256)
 		subtle.XORBytes(dst, src, keystream[:n])
 		cipher.state[12] += uint32(n / 64)
 
 		if n%64 != 0 {
-			end := 64 * (n/64 + 1)
-			leftoverLen := end - n
-			copy(cipher.leftover[:], keystream[n:end])
+			leftoverLen := min(64-n%64, 63)
+			copy(cipher.leftover[:leftoverLen], keystream[n:])
 			cipher.state[12] += 1
 			cipher.leftoverLen = uint8(leftoverLen)
 			return

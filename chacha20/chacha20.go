@@ -100,10 +100,13 @@ func (cipher *CipherIetf) XORKeyStream(dst, src []byte) {
 
 	// Drain leftover keystream from a previous call.
 	if cipher.leftoverLen > 0 {
-		n := min(int(cipher.leftoverLen), len(src))
+		// leftoverLen is at most len(leftover) == 63; min makes that fact
+		// visible, so all leftover slicing below is bounds-check-free.
+		leftoverLen := min(int(cipher.leftoverLen), len(cipher.leftover))
+		n := min(leftoverLen, len(src))
 		subtle.XORBytes(dst[:n], src[:n], cipher.leftover[:n])
-		copy(cipher.leftover[:], cipher.leftover[n:cipher.leftoverLen])
-		cipher.leftoverLen -= uint8(n)
+		copy(cipher.leftover[:], cipher.leftover[n:leftoverLen])
+		cipher.leftoverLen = uint8(leftoverLen - n)
 		dst, src = dst[n:], src[n:]
 		if len(src) == 0 {
 			return
@@ -121,7 +124,7 @@ func (cipher *CipherIetf) XORKeyStream(dst, src []byte) {
 func (cipher *CipherIetf) xorKeyStreamScalar(dst, src []byte) {
 	for len(src) > 0 {
 		block := chacha20Block(cipher.state)
-		n := min(blockSize, len(src))
+		n := min(blockSize, len(src), len(dst))
 		subtle.XORBytes(dst[:n], src[:n], block[:n])
 		cipher.state[12] += 1
 

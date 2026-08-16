@@ -1,5 +1,3 @@
-//go:build amd64 && goexperiment.simd
-
 package chacha20
 
 import (
@@ -11,12 +9,16 @@ import (
 // xorKeyStream is the amd64 SIMD backend hook. It XORs src with the key
 // stream generated from state and maintains leftover key stream state.
 //
-// The 256-bit AVX2 path is used when the CPU supports AVX2; otherwise the
-// portable scalar backend runs.
+// The 512-bit AVX-512 path is used when the CPU supports it, then the 256-bit
+// AVX2 path when the CPU supports AVX2; otherwise the portable scalar backend
+// runs.
 func (cipher *CipherIetf) xorKeyStream(dst, src []byte) {
-	if archsimd.X86.AVX2() && len(src) > 64 {
+	switch {
+	case archsimd.X86.AVX512() && len(src) > 256:
+		cipher.xorKeyStreamAVX512(dst, src)
+	case archsimd.X86.AVX2() && len(src) > 64:
 		cipher.xorKeyStreamAVX2(dst, src)
-	} else {
+	default:
 		cipher.xorKeyStreamScalar(dst, src)
 	}
 }
@@ -52,7 +54,8 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 	i14 := archsimd.BroadcastUint32x8(cipher.state[14])
 	i15 := archsimd.BroadcastUint32x8(cipher.state[15])
 
-	for len(src) >= 512 {
+	// len(dst) >= 512 is not needed but it removes bound checks
+	for len(src) >= 512 && len(dst) >= 512 {
 		w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
 			chacha8BlocksAVX2(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, counter, i13, i14, i15)
 
@@ -105,14 +108,14 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 		storeBlock(ks, 384, 1, 3, a2, b2, c2, d2)
 		storeBlock(ks, 448, 1, 3, a3, b3, c3, d3)
 
-		n := len(src)
+		// min() removes bound checks
+		n := min(len(src), 512)
 		subtle.XORBytes(dst, src, keystream[:n])
 		cipher.state[12] += uint32(n / 64)
 
 		if n%64 != 0 {
-			end := 64 * (n/64 + 1)
-			leftoverLen := end - n
-			copy(cipher.leftover[:], keystream[n:end])
+			leftoverLen := min(64-n%64, 63)
+			copy(cipher.leftover[:leftoverLen], keystream[n:])
 			cipher.state[12] += 1
 			cipher.leftoverLen = uint8(leftoverLen)
 			return
@@ -166,11 +169,11 @@ func chacha8BlocksAVX2(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i1
 }
 
 // quarterRoundAVX2 is the ChaCha20 quarter round on the word-major layout.
-// All rotations use two shifts and an or with immediate counts, which on AVX2
-// is the fastest option that needs no extra vector register (VPSHUFB would
-// require shuffle-index registers or per-use loads, both of which measurably
-// increase round-loop register pressure; there is no single-instruction
-// 32-bit rotate before AVX512).
+// All rotations use two shifts and an or with immediate counts. VPSHUFB is not
+// used for the byte-aligned 16/8 rotates: its shuffle-index mask occupies two
+// extra registers in the round loop (where all 16 YMM registers already hold
+// state words), which measurably increases spilling (101 vs 91 stack accesses
+// for the whole block). The two-shift-and-or form needs no mask register.
 func quarterRoundAVX2(a, b, c, d archsimd.Uint32x8) (archsimd.Uint32x8, archsimd.Uint32x8, archsimd.Uint32x8, archsimd.Uint32x8) {
 	// a += b; d ^= a; d <<<= 16
 	a = a.Add(b)
