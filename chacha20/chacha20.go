@@ -35,6 +35,8 @@ type CipherIetf struct {
 	// leftoverLen bytes at the front. Max 63 = one block minus one.
 	leftover    [63]byte
 	leftoverLen uint8
+	// set to true if the counter wrapped
+	overflow bool
 }
 
 var _ cipher.Stream = (*CipherIetf)(nil)
@@ -81,6 +83,7 @@ func NewIetf(key [32]byte, nonce [12]byte) CipherIetf {
 func (cipher *CipherIetf) SetCounter(counter uint32) {
 	cipher.state[12] = counter
 	cipher.leftoverLen = 0
+	cipher.overflow = false
 }
 
 // XORKeyStream XORs each byte of src with the key stream and writes the result
@@ -91,6 +94,9 @@ func (cipher *CipherIetf) SetCounter(counter uint32) {
 // dst and src must overlap entirely or not at all; len(dst) must be >=
 // len(src).
 func (cipher *CipherIetf) XORKeyStream(dst, src []byte) {
+	if len(src) == 0 {
+		return
+	}
 	if len(dst) < len(src) {
 		panic("chacha20: output smaller than input")
 	}
@@ -113,6 +119,13 @@ func (cipher *CipherIetf) XORKeyStream(dst, src []byte) {
 		}
 	}
 
+	numBlocks := (uint64(len(src)) + blockSize - 1) / blockSize
+	if cipher.overflow || uint64(cipher.state[12])+numBlocks > 1<<32 {
+		panic("chacha20: counter overflow")
+	} else if uint64(cipher.state[12])+numBlocks == 1<<32 {
+		cipher.overflow = true
+	}
+
 	// Generate fresh keystream for the remaining input. xorKeyStream is
 	// the platform-specific backend: SIMD where available, scalar elsewhere.
 	cipher.xorKeyStream(dst, src)
@@ -123,7 +136,7 @@ func (cipher *CipherIetf) XORKeyStream(dst, src []byte) {
 // (0..63) stored at leftover[:n].
 func (cipher *CipherIetf) xorKeyStreamScalar(dst, src []byte) {
 	for len(src) > 0 {
-		block := chacha20Block(cipher.state)
+		block := cipher.chacha20Block()
 		n := min(blockSize, len(src), len(dst))
 		subtle.XORBytes(dst[:n], src[:n], block[:n])
 		cipher.state[12] += 1
@@ -140,9 +153,9 @@ func (cipher *CipherIetf) xorKeyStreamScalar(dst, src []byte) {
 }
 
 // chacha20Block computes one 64-byte key stream block for the state.
-func chacha20Block(state [16]uint32) [64]byte {
+func (cipher *CipherIetf) chacha20Block() [64]byte {
 	var w [16]uint32
-	copy(w[:], state[:])
+	copy(w[:], cipher.state[:])
 
 	for r := 0; r < 10; r++ {
 		w[0], w[4], w[8], w[12] = quarterRound(w[0], w[4], w[8], w[12])
@@ -158,7 +171,7 @@ func chacha20Block(state [16]uint32) [64]byte {
 
 	var out [64]byte
 	for i := 0; i < 16; i++ {
-		binary.LittleEndian.PutUint32(out[i*4:], w[i]+state[i])
+		binary.LittleEndian.PutUint32(out[i*4:], w[i]+cipher.state[i])
 	}
 	return out
 }

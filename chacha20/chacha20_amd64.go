@@ -142,6 +142,8 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 		cipher.state[12] += uint32(n / 64)
 
 		if n%64 != 0 {
+			// n%64 != 0 here, so 64-n%64 is already ≤ 63; min makes that
+			// visible for bounds-check elision on cipher.leftover[:]
 			leftoverLen := min(64-n%64, 63)
 			copy(cipher.leftover[:leftoverLen], keystream[n:])
 			cipher.state[12] += 1
