@@ -45,8 +45,8 @@ var (
 // runs.
 func (cipher *CipherIetf) xorKeyStream(dst, src []byte) {
 	switch {
-	case archsimd.X86.AVX512() && len(src) > 256:
-		cipher.xorKeyStreamAVX512(dst, src)
+	// case archsimd.X86.AVX512() && len(src) > 256:
+	// 	cipher.xorKeyStreamAVX512(dst, src)
 	case archsimd.X86.AVX2() && len(src) > 64:
 		cipher.xorKeyStreamAVX2(dst, src)
 	default:
