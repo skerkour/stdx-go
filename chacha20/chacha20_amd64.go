@@ -32,9 +32,9 @@ var (
 		{6, 0, 0, 0, 6, 0, 0, 0},
 	}
 
-	// counterIncrement advances the column counters (word 12, element 0 of each
-	// 128-bit lane) by one batch of 4 blocks.
-	counterIncrement = [8]uint32{4, 0, 0, 0, 4, 0, 0, 0}
+	// counterIncrement advances all four column counters (word 12, element 0 of
+	// each 128-bit lane) by one batch of 8 blocks.
+	counterIncrement = [8]uint32{8, 0, 0, 0, 8, 0, 0, 0}
 )
 
 // xorKeyStream is the amd64 SIMD backend hook. It XORs src with the key
@@ -65,14 +65,8 @@ func (cipher *CipherIetf) xorKeyStream(dst, src []byte) {
 // across four Uint32x8 vectors, so one vectorized quarter round operates on
 // four ChaCha columns at once. The 16/8-bit rotations are single VPSHUFB
 // shuffles and the output transpose is fused into the load/xor/store. If the
-// input is not a multiple of 256 bytes, the final iteration produces the tail
+// input is not a multiple of 512 bytes, the final iteration produces the tail
 // and any unused key stream of the last partial block is retained.
-//
-// Two columns (4 blocks) are kept in flight rather than four: the two VPSHUFB
-// rotation masks are loop-invariant register values, so holding all 16 state
-// words at once (as chachaAVX2_amd64.s does with memory-operand masks) would
-// exceed the 16 available YMM registers and force spills in the round loop.
-// With two columns the round loop needs only 8 state vectors + 2 masks.
 func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 	// initial state in column-major layout. s01/s23 are the two halves of the
 	// 64-byte state; each column duplicates one 4-word group across its two
@@ -93,6 +87,10 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 
 	c1w0, c1w1, c1w2 := c0w0, c0w1, c0w2
 	c1w3 := c0w3.Add(archsimd.LoadUint32x8Array(&counterOffsets[1]))
+	c2w0, c2w1, c2w2 := c0w0, c0w1, c0w2
+	c2w3 := c0w3.Add(archsimd.LoadUint32x8Array(&counterOffsets[2]))
+	c3w0, c3w1, c3w2 := c0w0, c0w1, c0w2
+	c3w3 := c0w3.Add(archsimd.LoadUint32x8Array(&counterOffsets[3]))
 
 	// VPSHUFB rotation masks and the per-iteration counter increment, all
 	// loop-invariant.
@@ -100,21 +98,10 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 	rotl8 := archsimd.LoadInt8x32Array(&rotl8Idx)
 	counterInc := archsimd.LoadUint32x8Array(&counterIncrement)
 
-	// len(dst) >= 256 is not needed but it removes bound checks
-	for len(src) >= 256 && len(dst) >= 256 {
-		// 20 rounds, no add-back: keeps the round loop to 10 live vectors.
-		r0w0, r0w1, r0w2, r0w3, r1w0, r1w1, r1w2, r1w3 :=
-			chacha4ColumnsRoundsAVX2(c0w0, c0w1, c0w2, c0w3, c1w0, c1w1, c1w2, c1w3, rotl16, rotl8)
-
-		// add-back against the initial columns
-		o0w0 := r0w0.Add(c0w0)
-		o0w1 := r0w1.Add(c0w1)
-		o0w2 := r0w2.Add(c0w2)
-		o0w3 := r0w3.Add(c0w3)
-		o1w0 := r1w0.Add(c1w0)
-		o1w1 := r1w1.Add(c1w1)
-		o1w2 := r1w2.Add(c1w2)
-		o1w3 := r1w3.Add(c1w3)
+	// len(dst) >= 512 is not needed but it removes bound checks
+	for len(src) >= 512 && len(dst) >= 512 {
+		o0w0, o0w1, o0w2, o0w3, o1w0, o1w1, o1w2, o1w3, o2w0, o2w1, o2w2, o2w3, o3w0, o3w1, o3w2, o3w3 :=
+			chacha8ColumnsAVX2(c0w0, c0w1, c0w2, c0w3, c1w0, c1w1, c1w2, c1w3, c2w0, c2w1, c2w2, c2w3, c3w0, c3w1, c3w2, c3w3, rotl16, rotl8)
 
 		srcPointer := unsafe.Pointer(&src[0])
 		dstPointer := unsafe.Pointer(&dst[0])
@@ -122,29 +109,35 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 		// each column outputs two 64-byte blocks: block 2k and 2k+1
 		xorStoreCol(dstPointer, srcPointer, 0, o0w0, o0w1, o0w2, o0w3)
 		xorStoreCol(dstPointer, srcPointer, 128, o1w0, o1w1, o1w2, o1w3)
+		xorStoreCol(dstPointer, srcPointer, 256, o2w0, o2w1, o2w2, o2w3)
+		xorStoreCol(dstPointer, srcPointer, 384, o3w0, o3w1, o3w2, o3w3)
 
-		src = src[256:]
-		dst = dst[256:]
+		src = src[512:]
+		dst = dst[512:]
 		c0w3 = c0w3.Add(counterInc)
 		c1w3 = c1w3.Add(counterInc)
+		c2w3 = c2w3.Add(counterInc)
+		c3w3 = c3w3.Add(counterInc)
 	}
 
 	cipher.state[12] = c0w3.GetLo().GetElem(0)
 
-	// Tail: < 256 bytes. Generate 4 blocks of key stream into a local
+	// Tail: < 512 bytes. Generate 8 blocks of key stream into a local
 	// buffer, XOR the consumed part, and keep the unused bytes of the last
 	// partial block as leftover (<= 63).
 	if len(src) > 0 {
-		var keystream [256]byte
-		r0w0, r0w1, r0w2, r0w3, r1w0, r1w1, r1w2, r1w3 :=
-			chacha4ColumnsRoundsAVX2(c0w0, c0w1, c0w2, c0w3, c1w0, c1w1, c1w2, c1w3, rotl16, rotl8)
+		var keystream [512]byte
+		o0w0, o0w1, o0w2, o0w3, o1w0, o1w1, o1w2, o1w3, o2w0, o2w1, o2w2, o2w3, o3w0, o3w1, o3w2, o3w3 :=
+			chacha8ColumnsAVX2(c0w0, c0w1, c0w2, c0w3, c1w0, c1w1, c1w2, c1w3, c2w0, c2w1, c2w2, c2w3, c3w0, c3w1, c3w2, c3w3, rotl16, rotl8)
 
 		ks := unsafe.Pointer(&keystream[0])
-		storeCol(ks, 0, r0w0.Add(c0w0), r0w1.Add(c0w1), r0w2.Add(c0w2), r0w3.Add(c0w3))
-		storeCol(ks, 128, r1w0.Add(c1w0), r1w1.Add(c1w1), r1w2.Add(c1w2), r1w3.Add(c1w3))
+		storeCol(ks, 0, o0w0, o0w1, o0w2, o0w3)
+		storeCol(ks, 128, o1w0, o1w1, o1w2, o1w3)
+		storeCol(ks, 256, o2w0, o2w1, o2w2, o2w3)
+		storeCol(ks, 384, o3w0, o3w1, o3w2, o3w3)
 
 		// min() removes bound checks
-		n := min(len(src), 256)
+		n := min(len(src), 512)
 		subtle.XORBytes(dst, src, keystream[:n])
 		cipher.state[12] += uint32(n / 64)
 
@@ -160,20 +153,23 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 	cipher.leftoverLen = 0
 }
 
-// chacha4ColumnsRoundsAVX2 runs the 20 ChaCha20 rounds on two column groups
-// (blocks 0-3). The eight column vectors are passed in as the working state
-// and returned after the rounds; the caller performs the add-back so that only
-// the 8 state vectors and the 2 rotation masks (10 values) are live inside the
-// round loop.
-func chacha4ColumnsRoundsAVX2(i0w0, i0w1, i0w2, i0w3, i1w0, i1w1, i1w2, i1w3 archsimd.Uint32x8, rotl16, rotl8 archsimd.Int8x32) (o0w0, o0w1, o0w2, o0w3, o1w0, o1w1, o1w2, o1w3 archsimd.Uint32x8) {
+// chacha8ColumnsAVX2 computes 8 blocks of ChaCha20 key stream (20 rounds +
+// add-back) on the column-major layout. The 16 initial column vectors are
+// passed in and the compiler keeps them in the stack frame across the round
+// loop, reloading them at the add-back. rotl16/rotl8 are the VPSHUFB rotation
+// masks. The returned 16 vectors hold the add-back results in the same
+// column-major layout.
+func chacha8ColumnsAVX2(i0w0, i0w1, i0w2, i0w3, i1w0, i1w1, i1w2, i1w3, i2w0, i2w1, i2w2, i2w3, i3w0, i3w1, i3w2, i3w3 archsimd.Uint32x8, rotl16, rotl8 archsimd.Int8x32) (o0w0, o0w1, o0w2, o0w3, o1w0, o1w1, o1w2, o1w3, o2w0, o2w1, o2w2, o2w3, o3w0, o3w1, o3w2, o3w3 archsimd.Uint32x8) {
 	// working state
-	w0w0, w0w1, w0w2, w0w3, w1w0, w1w1, w1w2, w1w3 :=
-		i0w0, i0w1, i0w2, i0w3, i1w0, i1w1, i1w2, i1w3
+	w0w0, w0w1, w0w2, w0w3, w1w0, w1w1, w1w2, w1w3, w2w0, w2w1, w2w2, w2w3, w3w0, w3w1, w3w2, w3w3 :=
+		i0w0, i0w1, i0w2, i0w3, i1w0, i1w1, i1w2, i1w3, i2w0, i2w1, i2w2, i2w3, i3w0, i3w1, i3w2, i3w3
 
 	for r := 0; r < 10; r++ {
 		// column quarter rounds
 		w0w0, w0w1, w0w2, w0w3 = quarterRoundCol(w0w0, w0w1, w0w2, w0w3, rotl16, rotl8)
 		w1w0, w1w1, w1w2, w1w3 = quarterRoundCol(w1w0, w1w1, w1w2, w1w3, rotl16, rotl8)
+		w2w0, w2w1, w2w2, w2w3 = quarterRoundCol(w2w0, w2w1, w2w2, w2w3, rotl16, rotl8)
+		w3w0, w3w1, w3w2, w3w3 = quarterRoundCol(w3w0, w3w1, w3w2, w3w3, rotl16, rotl8)
 
 		// rotate the rows so the next quarter rounds hit the diagonals
 		w0w1 = w0w1.ConcatPermuteScalarsGrouped(1, 2, 3, 0, w0w1)
@@ -182,10 +178,18 @@ func chacha4ColumnsRoundsAVX2(i0w0, i0w1, i0w2, i0w3, i1w0, i1w1, i1w2, i1w3 arc
 		w1w1 = w1w1.ConcatPermuteScalarsGrouped(1, 2, 3, 0, w1w1)
 		w1w2 = w1w2.ConcatPermuteScalarsGrouped(2, 3, 0, 1, w1w2)
 		w1w3 = w1w3.ConcatPermuteScalarsGrouped(3, 0, 1, 2, w1w3)
+		w2w1 = w2w1.ConcatPermuteScalarsGrouped(1, 2, 3, 0, w2w1)
+		w2w2 = w2w2.ConcatPermuteScalarsGrouped(2, 3, 0, 1, w2w2)
+		w2w3 = w2w3.ConcatPermuteScalarsGrouped(3, 0, 1, 2, w2w3)
+		w3w1 = w3w1.ConcatPermuteScalarsGrouped(1, 2, 3, 0, w3w1)
+		w3w2 = w3w2.ConcatPermuteScalarsGrouped(2, 3, 0, 1, w3w2)
+		w3w3 = w3w3.ConcatPermuteScalarsGrouped(3, 0, 1, 2, w3w3)
 
 		// diagonal quarter rounds
 		w0w0, w0w1, w0w2, w0w3 = quarterRoundCol(w0w0, w0w1, w0w2, w0w3, rotl16, rotl8)
 		w1w0, w1w1, w1w2, w1w3 = quarterRoundCol(w1w0, w1w1, w1w2, w1w3, rotl16, rotl8)
+		w2w0, w2w1, w2w2, w2w3 = quarterRoundCol(w2w0, w2w1, w2w2, w2w3, rotl16, rotl8)
+		w3w0, w3w1, w3w2, w3w3 = quarterRoundCol(w3w0, w3w1, w3w2, w3w3, rotl16, rotl8)
 
 		// inverse row rotation
 		w0w1 = w0w1.ConcatPermuteScalarsGrouped(3, 0, 1, 2, w0w1)
@@ -194,9 +198,32 @@ func chacha4ColumnsRoundsAVX2(i0w0, i0w1, i0w2, i0w3, i1w0, i1w1, i1w2, i1w3 arc
 		w1w1 = w1w1.ConcatPermuteScalarsGrouped(3, 0, 1, 2, w1w1)
 		w1w2 = w1w2.ConcatPermuteScalarsGrouped(2, 3, 0, 1, w1w2)
 		w1w3 = w1w3.ConcatPermuteScalarsGrouped(1, 2, 3, 0, w1w3)
+		w2w1 = w2w1.ConcatPermuteScalarsGrouped(3, 0, 1, 2, w2w1)
+		w2w2 = w2w2.ConcatPermuteScalarsGrouped(2, 3, 0, 1, w2w2)
+		w2w3 = w2w3.ConcatPermuteScalarsGrouped(1, 2, 3, 0, w2w3)
+		w3w1 = w3w1.ConcatPermuteScalarsGrouped(3, 0, 1, 2, w3w1)
+		w3w2 = w3w2.ConcatPermuteScalarsGrouped(2, 3, 0, 1, w3w2)
+		w3w3 = w3w3.ConcatPermuteScalarsGrouped(1, 2, 3, 0, w3w3)
 	}
 
-	return w0w0, w0w1, w0w2, w0w3, w1w0, w1w1, w1w2, w1w3
+	// add-back
+	o0w0 = w0w0.Add(i0w0)
+	o0w1 = w0w1.Add(i0w1)
+	o0w2 = w0w2.Add(i0w2)
+	o0w3 = w0w3.Add(i0w3)
+	o1w0 = w1w0.Add(i1w0)
+	o1w1 = w1w1.Add(i1w1)
+	o1w2 = w1w2.Add(i1w2)
+	o1w3 = w1w3.Add(i1w3)
+	o2w0 = w2w0.Add(i2w0)
+	o2w1 = w2w1.Add(i2w1)
+	o2w2 = w2w2.Add(i2w2)
+	o2w3 = w2w3.Add(i2w3)
+	o3w0 = w3w0.Add(i3w0)
+	o3w1 = w3w1.Add(i3w1)
+	o3w2 = w3w2.Add(i3w2)
+	o3w3 = w3w3.Add(i3w3)
+	return
 }
 
 // quarterRoundCol is the ChaCha20 quarter round on the column-major layout.
