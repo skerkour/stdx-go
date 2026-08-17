@@ -146,8 +146,7 @@ func (cipher *CipherIetf) xorKeyStreamAVX512(dst, src []byte) {
 // entry (all 16 ZMM registers are needed by the working state), then reloaded
 // at the add-back. The round loop itself spills nothing.
 func chacha16BlocksAVX512(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i13, i14, i15 archsimd.Uint32x16) (o0, o1, o2, o3, o4, o5, o6, o7, o8, o9, o10, o11, o12, o13, o14, o15 archsimd.Uint32x16) {
-	var w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 archsimd.Uint32x16
-	w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 =
+	w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
 		i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i13, i14, i15
 
 	// VPROLVD count vectors, loop-invariant; loaded once and kept in registers
