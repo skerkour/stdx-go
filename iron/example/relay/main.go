@@ -39,7 +39,7 @@ func main() {
 	flag.Var(&peers, "relays", "other relay http(s):// URLs to federate with (repeatable)")
 	flag.Parse()
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	s := relayserver.NewServer(logger)
 	s.Secret = *secret
 	s.Self = *url

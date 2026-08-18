@@ -114,16 +114,6 @@ func (conn *Connection) current() *quic.Conn {
 	return conn.cur
 }
 
-// swap replaces the underlying connection and returns the previous one.
-func (c *Connection) swap(conn *quic.Conn, path string) *quic.Conn {
-	c.mu.Lock()
-	old := c.cur
-	c.cur = conn
-	c.path = path
-	c.mu.Unlock()
-	return old
-}
-
 // isDead reports whether the given underlying connection has closed.
 func (c *Connection) isDead(conn *quic.Conn) bool {
 	return conn.Context().Err() != nil
@@ -204,6 +194,9 @@ func (c *Connection) redial() {
 		c.redialMu.Unlock()
 	}()
 
+	if c.isClosed() {
+		return // explicitly closed: never resurrect
+	}
 	cur := c.current()
 	if !c.isDead(cur) {
 		return // the current connection is fine; nothing to do
@@ -234,7 +227,21 @@ func (c *Connection) redial() {
 		}
 		path = PathDirect
 	}
-	c.swap(conn, path)
+
+	// Only install the replacement if the connection is still open and the
+	// current connection is still the dead one we dialed for. An explicit
+	// Close while we were dialing must not be resurrected, and a concurrent
+	// upgradeToDirect that already moved us onto a live direct connection
+	// must not be clobbered (or the fresh dial leaked).
+	c.mu.Lock()
+	if c.isClosed() || c.cur != cur {
+		c.mu.Unlock()
+		_ = conn.CloseWithError(0, "")
+		return
+	}
+	c.cur = conn
+	c.path = path
+	c.mu.Unlock()
 }
 
 // upgradeToDirect transparently moves the connection from the relay to a

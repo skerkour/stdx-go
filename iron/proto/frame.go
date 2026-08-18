@@ -83,8 +83,8 @@ var tagSet = func() cbor.TagSet {
 	addToTagSet(tagOptions, HolePunch{}, MsgHolePunch)
 	addToTagSet(tagOptions, RelayToRelayBatch{}, MsgRelayToRelayBatch)
 	addToTagSet(tagOptions, LocalAddrs{}, MsgLocalAddrs)
-	addToTagSet(tagOptions, APILookup{}, MsgAPILookup)
-	addToTagSet(tagOptions, APILookupResp{}, MsgAPILookupResp)
+	addToTagSet(tagOptions, APILookupRequest{}, MsgAPILookup)
+	addToTagSet(tagOptions, APILookupResponse{}, MsgAPILookupResp)
 	addToTagSet(tagOptions, Hello{}, MsgHello)
 	return tagSet
 }()
@@ -211,16 +211,16 @@ type HolePunch struct {
 
 // HTTP directory API messages.
 
-// APILookup asks for another node's direct addresses.
-type APILookup struct {
+// APILookupRequest asks for another node's direct addresses.
+type APILookupRequest struct {
 	ID base.NodeID `cbor:"0,keyasint"`
 }
 
-// APILookupResp is the answer to an APILookup: the peer's direct addresses, its
+// APILookupResponse is the answer to an APILookup: the peer's direct addresses, its
 // observed public IP (empty when it is not connected to the relay) and the
 // relays that reported the peer (the answering relay's own host first, then
 // any of its peers that found the peer too).
-type APILookupResp struct {
+type APILookupResponse struct {
 	Addrs       []string `cbor:"0,keyasint"`
 	Observed    string   `cbor:"1,keyasint,omitempty"`
 	FoundRelays []string `cbor:"2,keyasint"`

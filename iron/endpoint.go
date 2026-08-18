@@ -102,32 +102,19 @@ func NewEndpoint(ctx context.Context, secret *base.NodeSecret, alpn string, opts
 	if options.relayOnly && len(relays) == 0 {
 		return nil, errors.New("WithRelayOnly requires at least one relay")
 	}
-
-	var endpoint *Endpoint
-	var rc *relay.RelayConn
-	var url string
-	if len(relays) > 0 {
-		relayOpts := []relay.Option{
-			relay.WithBatch(options.batchSize, options.batchCount, options.drainDelay),
-			relay.WithHolePunchHandler(func(id base.NodeID, addrs []*net.UDPAddr) {
-				if endpoint != nil {
-					endpoint.handleHolePunch(id, addrs)
-				}
-			}),
-		}
-		var err error
-		rc, url, err = dialRelayAny(ctx, relays, secret, relayOpts...)
-		if err != nil {
-			return nil, err
-		}
-		relays = orderRelays(relays, url)
+	if options.logger == nil {
+		options.logger = slog.New(slog.DiscardHandler)
 	}
 
 	// Bind the direct UDP socket (IPv6 with V6ONLY=0, so both IPv4 and IPv6
 	// direct connections work from a single socket). In relay-only mode no
-	// direct socket is opened at all.
+	// direct socket is opened at all. The socket is bound before the relay is
+	// dialed so the endpoint value below is fully initialized before the relay
+	// client's read-loop goroutine starts, which can dispatch an inbound hole
+	// punch into endpoint.handleHolePunch as soon as the dial returns.
 	var directConn net.PacketConn
 	var directAddr *net.UDPAddr
+	ownedDirect := false
 	switch {
 	case options.relayOnly:
 		// no direct socket
@@ -137,13 +124,11 @@ func NewEndpoint(ctx context.Context, secret *base.NodeSecret, alpn string, opts
 	default:
 		udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv6unspecified})
 		if err != nil {
-			if rc != nil {
-				rc.Close()
-			}
 			return nil, err
 		}
 		directConn = udpConn
 		directAddr = udpConn.LocalAddr().(*net.UDPAddr)
+		ownedDirect = true
 	}
 
 	var stunC *stunConn
@@ -151,18 +136,16 @@ func NewEndpoint(ctx context.Context, secret *base.NodeSecret, alpn string, opts
 		stunC = newStunConn(directConn)
 	}
 
-	if options.logger == nil {
-		options.logger = slog.New(slog.DiscardHandler)
-	}
-
-	endpoint = &Endpoint{
+	// Construct the endpoint before dialing the relay: the hole-punch handler
+	// registered with the relay dial may run on the relay client's read-loop
+	// goroutine the moment the dial completes, so it must observe a fully
+	// initialized endpoint. Everything handleHolePunch reads (relayOnly,
+	// directConn, closeCh) is set here, before any relay goroutine exists.
+	endpoint := &Endpoint{
 		secret:           secret,
 		logger:           options.logger,
-		relayURL:         url,
-		relays:           relays,
 		relayOnly:        options.relayOnly,
 		announcers:       append([]discovery.Announcer(nil), options.announcers...),
-		relayConn:        rc,
 		directConn:       stunC,
 		directAddr:       directAddr,
 		stun:             stunC,
@@ -177,11 +160,34 @@ func NewEndpoint(ctx context.Context, secret *base.NodeSecret, alpn string, opts
 	if stunC != nil {
 		endpoint.directTr = &quic.Transport{Conn: stunC}
 	}
-	if rc != nil {
-		endpoint.relayTr = &quic.Transport{Conn: rc}
-	}
 	if endpoint.relayWaitTimeout == 0 {
 		endpoint.relayWaitTimeout = defaultRelayWaitTimeout
+	}
+
+	var rc *relay.RelayConn
+	var url string
+	if len(relays) > 0 {
+		relayOpts := []relay.Option{
+			relay.WithBatch(options.batchSize, options.batchCount, options.drainDelay),
+			relay.WithHolePunchHandler(func(id base.NodeID, addrs []*net.UDPAddr) {
+				endpoint.handleHolePunch(id, addrs)
+			}),
+		}
+		var err error
+		rc, url, err = dialRelayAny(ctx, relays, secret, relayOpts...)
+		if err != nil {
+			// Only the socket we bound ourselves: a caller-supplied
+			// WithDirectConn is the caller's to close on a failed NewEndpoint.
+			if ownedDirect {
+				_ = directConn.Close()
+			}
+			return nil, err
+		}
+		relays = orderRelays(relays, url)
+		endpoint.relayURL = url
+		endpoint.relays = relays
+		endpoint.relayConn = rc
+		endpoint.relayTr = &quic.Transport{Conn: rc}
 	}
 
 	serverCfg, err := serverTLSConfig(secret, endpoint.tlsCfg)
@@ -484,12 +490,17 @@ func (endpoint *Endpoint) dial(ctx context.Context, peer base.NodeID, co connect
 
 	results := make(chan dialResult, 2)
 	directIdle := make(chan struct{}) // closed when the direct path has nothing to try
+	directDone := make(chan struct{}) // closed once the direct path has reported
 
 	go func() {
+		defer close(directDone)
 		results <- endpoint.dialDirectPath(dctx, peer, co, directIdle)
 	}()
+	var relayDone chan struct{}
 	if foundOnRelay {
+		relayDone = make(chan struct{})
 		go func() {
+			defer close(relayDone)
 			// If the direct path reports it has nothing to try, dial the relay
 			// immediately; otherwise give the direct path a head start so a
 			// reachable direct connection wins deterministically.
@@ -514,13 +525,22 @@ func (endpoint *Endpoint) dial(ctx context.Context, peer base.NodeID, co connect
 			done++
 			if r.err == nil {
 				cancel()
-				// Close any connection the other path established meanwhile.
-				select {
-				case r2 := <-results:
-					if r2.conn != nil && r2.conn != r.conn {
-						_ = r2.conn.CloseWithError(0, "")
+				// The other path has lost the race: wait for it to report, so
+				// no connection it established (e.g. a direct dial that
+				// finished a moment before the cancel took effect) is leaked.
+				other := relayDone
+				if r.path == PathRelay {
+					other = directDone
+				}
+				if other != nil {
+					<-other
+					select {
+					case r2 := <-results:
+						if r2.conn != nil && r2.conn != r.conn {
+							_ = r2.conn.CloseWithError(0, "")
+						}
+					default:
 					}
-				default:
 				}
 				return r.conn, r.path, nil
 			}
@@ -918,7 +938,7 @@ func (endpoint *Endpoint) relayHTTPLookup(ctx context.Context, relayURL string, 
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	body, err := proto.Encode(proto.APILookup{ID: peer})
+	body, err := proto.Encode(proto.APILookupRequest{ID: peer})
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -942,7 +962,7 @@ func (endpoint *Endpoint) relayHTTPLookup(ctx context.Context, relayURL string, 
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	var lr proto.APILookupResp
+	var lr proto.APILookupResponse
 	if err := proto.Unmarshal(respBody, &lr); err != nil {
 		return nil, nil, nil, err
 	}
@@ -1427,14 +1447,27 @@ func (endpoint *Endpoint) reconnectRelay(ctx context.Context, opts ...relay.Opti
 // fresh QUIC transport, listens on it for inbound relayed connections,
 // re-announces our direct addresses, and swaps it in atomically.
 func (endpoint *Endpoint) installRelay(nrc *relay.RelayConn, url string) error {
+	// The endpoint may have been closed while the reconnection dial was in
+	// flight (watchRelay checks closeCh before dialing, but not after): refuse
+	// to install a fresh relay nobody would tear down.
+	if endpoint.isClosing() {
+		_ = nrc.Close()
+		return errors.New("endpoint closed")
+	}
 	tr := &quic.Transport{Conn: nrc}
 	serverCfg, err := serverTLSConfig(endpoint.secret, endpoint.tlsCfg)
 	if err != nil {
+		_ = nrc.Close()
 		return err
 	}
 	l, err := tr.Listen(serverCfg, defaultQUICConfig())
 	if err != nil {
+		_ = nrc.Close()
 		return err
+	}
+	if endpoint.isClosing() {
+		_ = nrc.Close()
+		return errors.New("endpoint closed")
 	}
 	go endpoint.acceptLoop(l, false)
 

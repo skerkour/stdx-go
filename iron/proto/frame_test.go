@@ -213,20 +213,20 @@ func TestAPIMessages(t *testing.T) {
 	var id base.NodeID
 	id[0] = 1
 
-	lookup, err := Encode(APILookup{ID: id})
+	lookup, err := Encode(APILookupRequest{ID: id})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var l APILookup
+	var l APILookupRequest
 	if err := Unmarshal(lookup, &l); err != nil || l.ID != id {
 		t.Fatalf("lookup round trip failed: %v", err)
 	}
 
-	resp, err := Encode(APILookupResp{Addrs: []string{"1.2.3.4:5000"}, Observed: "203.0.113.7"})
+	resp, err := Encode(APILookupResponse{Addrs: []string{"1.2.3.4:5000"}, Observed: "203.0.113.7"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var r APILookupResp
+	var r APILookupResponse
 	if err := Unmarshal(resp, &r); err != nil {
 		t.Fatal(err)
 	}

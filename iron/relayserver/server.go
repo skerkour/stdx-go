@@ -33,7 +33,7 @@ const relayPath = "/relay"
 // relayBroadcastTimeout caps how long a client lookup waits for the HTTP
 // broadcast to the configured peer relays before the relay answers with what
 // it has.
-const relayBroadcastTimeout = time.Second
+const relayBroadcastTimeout = 5 * time.Second
 
 // Backbone link reconnection backoff bounds.
 const (
@@ -256,7 +256,7 @@ func (server *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		switch m := v.(type) {
-		case proto.APILookup:
+		case proto.APILookupRequest:
 			server.writeLookupResp(w, server.lookupRespLocal(m.ID, ""))
 		case proto.Hello:
 			server.learnPeer(m.Self)
@@ -272,20 +272,14 @@ func (server *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	var v any
-	if err := proto.Unmarshal(body, &v); err != nil {
-		http.Error(w, "bad api message", http.StatusBadRequest)
-		return
-	}
-	m, ok := v.(proto.APILookup)
-	if !ok {
-		// Not a directory lookup: reject.
+	var apiReq proto.APILookupRequest
+	if err := proto.Unmarshal(body, &apiReq); err != nil {
 		http.Error(w, "bad api message", http.StatusBadRequest)
 		return
 	}
 	self := relayURLFromRequest(r)
-	resp := server.lookupRespLocal(m.ID, self)
-	for _, pr := range server.broadcastLookup(server.broadcastTargets(self), m.ID) {
+	resp := server.lookupRespLocal(apiReq.ID, self)
+	for _, pr := range server.broadcastLookup(server.broadcastTargets(self), apiReq.ID) {
 		if !pr.found {
 			continue
 		}
@@ -295,14 +289,19 @@ func (server *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 			resp.Observed = pr.observed
 		}
 	}
+	// A node announces the same direct addresses to every relay it connects
+	// to, so the aggregated answer may repeat them (and the found relays);
+	// collapse the duplicates, keeping first occurrences.
+	resp.Addrs = dedupeStrings(resp.Addrs)
+	resp.FoundRelays = dedupeStrings(resp.FoundRelays)
 	server.writeLookupResp(w, resp)
 }
 
 // lookupRespLocal builds the directory answer from this relay's own clients.
 // self, when non-empty, is reported as a "found" relay when the peer is local.
-func (server *Server) lookupRespLocal(peer base.NodeID, self string) proto.APILookupResp {
+func (server *Server) lookupRespLocal(peer base.NodeID, self string) proto.APILookupResponse {
 	addrs, observed, found := server.lookupLocal(peer)
-	resp := proto.APILookupResp{Addrs: addrs, Observed: observed}
+	resp := proto.APILookupResponse{Addrs: addrs, Observed: observed}
 	if self != "" && found {
 		resp.FoundRelays = append(resp.FoundRelays, self)
 	}
@@ -310,7 +309,7 @@ func (server *Server) lookupRespLocal(peer base.NodeID, self string) proto.APILo
 }
 
 // writeLookupResp encodes and writes a directory lookup response.
-func (server *Server) writeLookupResp(w http.ResponseWriter, resp proto.APILookupResp) {
+func (server *Server) writeLookupResp(w http.ResponseWriter, resp proto.APILookupResponse) {
 	out, err := proto.Encode(resp)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -338,6 +337,21 @@ func (server *Server) broadcastTargets(self string) []string {
 		}
 		seen[u] = true
 		out = append(out, u)
+	}
+	return out
+}
+
+// dedupeStrings collapses repeated strings, keeping each value's first
+// occurrence so the relative order is preserved.
+func dedupeStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
 	}
 	return out
 }
@@ -402,38 +416,38 @@ func (server *Server) broadcastLookup(targets []string, peer base.NodeID) []peer
 	if len(targets) == 0 {
 		return nil
 	}
-	results := make(chan peerLookupResult, len(targets))
-	for _, url := range targets {
-		go func(u string) {
-			results <- server.peerLookupOne(u, peer)
-		}(url)
-	}
-	deadline := time.Now().Add(relayBroadcastTimeout)
+
+	var outMutex sync.Mutex
 	out := make([]peerLookupResult, 0, len(targets))
-	for i := 0; i < len(targets); i++ {
-		select {
-		case r := <-results:
-			out = append(out, r)
-		case <-time.After(time.Until(deadline)):
-			return out
-		}
+	var waitgroup sync.WaitGroup
+	ctx, cancel := context.WithTimeout(context.Background(), relayBroadcastTimeout)
+	defer cancel()
+
+	for _, url := range targets {
+		waitgroup.Go(func() {
+			result := server.peerLookupOne(ctx, url, peer)
+			outMutex.Lock()
+			out = append(out, result)
+			outMutex.Unlock()
+		})
 	}
+
+	waitgroup.Wait()
 	return out
 }
 
 // peerLookupOne performs one signed... rather, one Bearer-authenticated HTTP
 // lookup against a single peer relay's /relay/api directory.
-func (server *Server) peerLookupOne(relayURL string, peer base.NodeID) peerLookupResult {
+func (server *Server) peerLookupOne(ctx context.Context, relayURL string, peer base.NodeID) peerLookupResult {
 	u, err := relayHTTPURL(relayURL, "/relay/api")
 	if err != nil {
 		return peerLookupResult{url: relayURL}
 	}
-	body, err := proto.Encode(proto.APILookup{ID: peer})
+	body, err := proto.Encode(proto.APILookupRequest{ID: peer})
 	if err != nil {
 		return peerLookupResult{url: relayURL}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), relayBroadcastTimeout)
-	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
 		return peerLookupResult{url: relayURL}
@@ -449,17 +463,19 @@ func (server *Server) peerLookupOne(relayURL string, peer base.NodeID) peerLooku
 	if resp.StatusCode != http.StatusOK {
 		return peerLookupResult{url: relayURL}
 	}
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 256_000))
 	if err != nil {
 		return peerLookupResult{url: relayURL}
 	}
-	var lr proto.APILookupResp
+	var lr proto.APILookupResponse
 	if err := proto.Unmarshal(respBody, &lr); err != nil {
 		return peerLookupResult{url: relayURL}
 	}
 	return peerLookupResult{
-		url: relayURL, addrs: lr.Addrs, observed: lr.Observed,
-		found: len(lr.Addrs) > 0 || lr.Observed != "",
+		url:      relayURL,
+		addrs:    lr.Addrs,
+		observed: lr.Observed,
+		found:    len(lr.Addrs) > 0 || lr.Observed != "",
 	}
 }
 

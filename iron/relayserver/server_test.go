@@ -192,13 +192,13 @@ func TestHTTPEndpoints(t *testing.T) {
 	done := addConnectedClient(t, srv, secret, announced)
 
 	// POST lookup (signed) -> returns the announced addrs + observed IP.
-	lookup, _ := proto.Encode(proto.APILookup{ID: id})
+	lookup, _ := proto.Encode(proto.APILookupRequest{ID: id})
 	resp := doRequest(t, signedRequest(ts, secret, http.MethodPost, "/relay/api", lookup))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("lookup status = %d, want 200", resp.StatusCode)
 	}
 	lookupBody, _ := readAll(resp)
-	var got proto.APILookupResp
+	var got proto.APILookupResponse
 	if err := proto.Unmarshal(lookupBody, &got); err != nil {
 		t.Fatalf("lookup decode: %v", err)
 	}
@@ -213,13 +213,13 @@ func TestHTTPEndpoints(t *testing.T) {
 	unknown := make([]byte, base.NodeIDLen)
 	unknown[0] = 1
 	uid, _ := base.NodeIDFromBytes(unknown)
-	lookup2, _ := proto.Encode(proto.APILookup{ID: uid})
+	lookup2, _ := proto.Encode(proto.APILookupRequest{ID: uid})
 	resp = doRequest(t, signedRequest(ts, secret, http.MethodPost, "/relay/api", lookup2))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("unknown lookup status = %d, want 200", resp.StatusCode)
 	}
 	got2Body, _ := readAll(resp)
-	var got2 proto.APILookupResp
+	var got2 proto.APILookupResponse
 	_ = proto.Unmarshal(got2Body, &got2)
 	if len(got2.Addrs) != 0 || got2.Observed != "" {
 		t.Fatalf("unknown peer returned %+v", got2)
@@ -230,7 +230,7 @@ func TestHTTPEndpoints(t *testing.T) {
 	waitFor(t, func() bool {
 		resp = doRequest(t, signedRequest(ts, secret, http.MethodPost, "/relay/api", lookup))
 		b, _ := readAll(resp)
-		var g proto.APILookupResp
+		var g proto.APILookupResponse
 		_ = proto.Unmarshal(b, &g)
 		return len(g.Addrs) == 0 && g.Observed == ""
 	})
@@ -259,7 +259,7 @@ func TestHTTPEndpoints(t *testing.T) {
 	resp.Body.Close()
 
 	// Tampered body: signature is for a different body -> 401.
-	otherBody, _ := proto.Encode(proto.APILookup{ID: uid})
+	otherBody, _ := proto.Encode(proto.APILookupRequest{ID: uid})
 	tampered := signedRequest(ts, secret, http.MethodPost, "/relay/api", otherBody)
 	tampered.Body = http.NoBody
 	resp = doRequest(t, tampered)
@@ -421,15 +421,15 @@ func mustEncode(t *testing.T, v any) []byte {
 
 // lookupViaHTTP issues a signed HTTP lookup for peer against ts and returns the
 // decoded response.
-func lookupViaHTTP(t *testing.T, ts *httptest.Server, secret *base.NodeSecret, peer base.NodeID) proto.APILookupResp {
+func lookupViaHTTP(t *testing.T, ts *httptest.Server, secret *base.NodeSecret, peer base.NodeID) proto.APILookupResponse {
 	t.Helper()
-	lookup, _ := proto.Encode(proto.APILookup{ID: peer})
+	lookup, _ := proto.Encode(proto.APILookupRequest{ID: peer})
 	resp := doRequest(t, signedRequest(ts, secret, http.MethodPost, "/relay/api", lookup))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("lookup status = %d, want 200", resp.StatusCode)
 	}
 	body, _ := readAll(resp)
-	var got proto.APILookupResp
+	var got proto.APILookupResponse
 	if err := proto.Unmarshal(body, &got); err != nil {
 		t.Fatalf("lookup decode: %v", err)
 	}
@@ -511,6 +511,59 @@ func TestHTTPLookupBroadcast(t *testing.T) {
 	}
 	if resp.Observed == "" {
 		t.Fatal("expected a non-empty observed IP")
+	}
+}
+
+// TestHTTPLookupBroadcastDedup verifies that when several peer relays report
+// the same peer (and the same announced addresses), the aggregated answer
+// deduplicates both the addresses and the found relays.
+func TestHTTPLookupBroadcastDedup(t *testing.T) {
+	const secret = "shared-secret"
+	srvA := NewServer(nil)
+	srvA.Secret = secret
+	srvB := NewServer(nil)
+	srvB.Secret = secret
+	srvC := NewServer(nil)
+	srvC.Secret = secret
+	tsA := httptest.NewServer(srvA.Handler())
+	defer tsA.Close()
+	tsB := httptest.NewServer(srvB.Handler())
+	defer tsB.Close()
+	tsC := httptest.NewServer(srvC.Handler())
+	defer tsC.Close()
+	relayBURL := "http://" + tsB.Listener.Addr().String()
+	relayCURL := "http://" + tsC.Listener.Addr().String()
+	srvA.SetPeers([]string{relayBURL, relayCURL})
+
+	secA, err := base.NewNodeSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerSec, err := base.NewNodeSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same peer announces the same addresses to both relays B and C.
+	announced := []string{"203.0.113.9:1234"}
+	doneB := addConnectedClient(t, srvB, peerSec, announced)
+	doneC := addConnectedClient(t, srvC, peerSec, announced)
+	defer doneB()
+	defer doneC()
+
+	// A asks its relay about the peer; the broadcast to B and C both find it,
+	// but the aggregated answer must not repeat addresses or relays.
+	resp := lookupViaHTTP(t, tsA, secA, peerSec.Public())
+	if len(resp.Addrs) != 1 || resp.Addrs[0] != announced[0] {
+		t.Fatalf("addrs = %v, want [%s]", resp.Addrs, announced[0])
+	}
+	want := map[string]bool{relayBURL: true, relayCURL: true}
+	if len(resp.FoundRelays) != len(want) {
+		t.Fatalf("found relays = %v, want %v", resp.FoundRelays, want)
+	}
+	for _, fr := range resp.FoundRelays {
+		if !want[fr] {
+			t.Fatalf("found relays = %v, want %v", resp.FoundRelays, want)
+		}
 	}
 }
 

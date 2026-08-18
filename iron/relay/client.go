@@ -588,7 +588,15 @@ func (conn *RelayConn) ReadFrom(p []byte) (int, net.Addr, error) {
 			conn.readMu.Unlock()
 		case <-deadlineCh: // deadline changed: re-evaluate
 		case <-fired:
-			return 0, nil, os.ErrDeadlineExceeded
+			// A computed timer can fire after the deadline was extended
+			// concurrently; only report it if it is still in the past.
+			conn.readDeadlineMu.Lock()
+			past := !conn.readDeadline.IsZero() && time.Now().After(conn.readDeadline)
+			conn.readDeadlineMu.Unlock()
+			if past {
+				return 0, nil, os.ErrDeadlineExceeded
+			}
+			// Deadline extended: re-evaluate with the new deadline.
 		}
 	}
 }
