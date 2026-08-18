@@ -23,7 +23,7 @@ func TestLookupCandidatesCache(t *testing.T) {
 	e.peerAddrs.Store(peer, &candidateEntry{addrs: want, at: time.Now()})
 
 	// A fresh cache hit returns the cached addresses without touching the relay.
-	got, err := e.lookupCandidates(context.Background(), peer)
+	got, _, _, err := e.lookupCandidates(context.Background(), peer, connectOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

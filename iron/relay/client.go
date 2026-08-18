@@ -13,7 +13,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/url"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,6 +28,30 @@ import (
 )
 
 const relayPath = "/relay"
+
+// validateRelayURL checks that url is a well-formed relay URL with an http or
+// https scheme. ws/wss URLs are rejected: the canonical iron relay address is
+// http(s):// (the WebSocket connection is derived from it internally).
+func validateRelayURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return errors.New("relay: invalid relay url: " + err.Error())
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("relay: invalid relay url scheme " + strconv.Quote(u.Scheme) + ": want http or https")
+	}
+	if u.Host == "" {
+		return errors.New("relay: invalid relay url: missing host")
+	}
+	return nil
+}
+
+// Default batching parameters.
+const (
+	defaultBatchSize  = 16 * 1024
+	defaultBatchCount = 16
+	defaultDrainDelay = 500 * time.Microsecond
+)
 
 // Keepalive tuning. A connection is considered dead when no frame at all has
 // been received within pingTimeout; the peer is pinged every pingInterval to
@@ -47,15 +73,22 @@ type RelayConn struct {
 
 	closed chan struct{} // closed when the read loop exits
 
-	q              chan datagram // incoming datagrams for ReadFrom
+	// relayMu guards relayURLs: the backbone relay URL to route a given peer's
+	// packets through, when the peer is on a different relay.
+	relayMu   sync.RWMutex
+	relayURLs map[base.NodeID]string
+
+	q              chan *batchEntry // incoming batches for ReadFrom
 	readDeadlineMu sync.Mutex
 	readDeadline   time.Time
 	deadlineCh     chan struct{} // closed+replaced whenever the deadline changes
 
-	lookupsMu sync.Mutex
-	lookups   map[base.NodeID]chan []*net.UDPAddr // outstanding GetEndpoints requests
+	readMu sync.Mutex
+	cur    *batchEntry // batch currently being served across ReadFrom calls
 
 	observed net.IP // our address as seen by the relay (from ObservedAddr)
+
+	holePunchHandler HolePunchHandler // inbound relay-assisted punch requests
 
 	batchSize  int // max bytes per batch frame (<=0 disables batching)
 	batchCount int // max packets per batch frame
@@ -68,36 +101,28 @@ type RelayConn struct {
 	pingTimeout  time.Duration // keepalive: silence threshold
 
 	lastRecvNano atomic.Int64 // unixnano of the last received frame (0 = none)
+	lastRTTNano  atomic.Int64 // most recent ping/pong round-trip (0 = none)
 }
 
-var deadlineFired = closedDeadline()
-
-func closedDeadline() <-chan struct{} {
-	ch := make(chan struct{})
-	close(ch)
-	return ch
+// batchEntry is one receive-side batch: QUIC packets of possibly varying sizes
+// from a single peer, served to the consumer one at a time.
+type batchEntry struct {
+	remote  base.NodeID
+	ecn     byte
+	packets [][]byte
+	idx     int // consumer cursor: next packet index
 }
 
-// timeout schedules firing of a struct channel after d, safe against close
-// races.
-type timeout struct {
-	once sync.Once
-	ch   chan struct{}
-}
-
-func newTimeout(d time.Duration) *timeout {
-	t := &timeout{ch: make(chan struct{})}
-	time.AfterFunc(d, t.fire)
-	return t
-}
-
-func (t *timeout) fire() { t.once.Do(func() { close(t.ch) }) }
-
-// datagram is a QUIC packet received from another peer through the relay.
-type datagram struct {
-	src  base.NodeID
-	ecn  byte
-	data []byte
+// serve copies the next packet into p and advances the cursor. It returns the
+// bytes copied, or 0 when the batch is exhausted. quic-go passes a
+// MaxPacketBufferSize buffer, so packets never exceed it.
+func (e *batchEntry) serve(p []byte) int {
+	if e.idx >= len(e.packets) {
+		return 0
+	}
+	pkt := e.packets[e.idx]
+	e.idx++
+	return copy(p, pkt)
 }
 
 // Option configures a relay connection.
@@ -109,11 +134,29 @@ type options struct {
 	drainDelay        time.Duration
 	keepaliveInterval time.Duration
 	keepaliveTimeout  time.Duration
+	holePunchHandler  HolePunchHandler
+	announceAddrs     []string
 }
 
-// WithBatch configures outbound relay batching. QUIC packets destined for
-// the same peer with the same size are coalesced into a single batch frame
-// (tag 5). batchSize is the max payload bytes per frame, batchCount the max
+// HolePunchHandler is called when the relay asks this client to punch to a
+// target node: it receives the target's announced direct addresses.
+type HolePunchHandler func(target base.NodeID, addrs []*net.UDPAddr)
+
+// WithHolePunchHandler sets the handler for inbound relay-assisted hole punch
+// requests.
+func WithHolePunchHandler(h HolePunchHandler) Option {
+	return func(o *options) { o.holePunchHandler = h }
+}
+
+// WithAnnounceAddrs sets the direct addresses this client publishes to the
+// relay during the handshake, so peers can find it. Empty means none.
+func WithAnnounceAddrs(addrs []string) Option {
+	return func(o *options) { o.announceAddrs = append([]string(nil), addrs...) }
+}
+
+// WithBatch configures outbound relay batching. QUIC packets destined for the
+// same peer are coalesced into a single batch frame, regardless of packet
+// size. batchSize is the max payload bytes per frame, batchCount the max
 // packets per frame, and drainDelay bounds how long a partial batch is kept
 // before being flushed. A batchSize <= 0 disables batching entirely.
 func WithBatch(batchSize, batchCount int, drainDelay time.Duration) Option {
@@ -134,59 +177,56 @@ func WithKeepalive(interval, timeout time.Duration) Option {
 	}
 }
 
-// Default batching parameters.
-const (
-	defaultBatchSize  = 64 * 1024
-	defaultBatchCount = 16
-	defaultDrainDelay = 500 * time.Microsecond
-)
-
-// batchKey groups buffered packets by destination and packet size (a batch
-// frame can only contain packets of equal length).
+// batchKey groups buffered packets by destination and backbone relay (batches
+// may mix packet sizes, so the size is no longer part of the key).
 type batchKey struct {
-	dst  base.NodeID
-	size int
+	dst   base.NodeID
+	relay string
 }
 
 type batch struct {
-	contents []byte
-	count    int
+	packets [][]byte
+	count   int
+	bytes   int // total payload bytes, for the batchSize limit
 }
 
 // Dial connects to the relay at ws(s)://host/relay, authenticates with the
 // challenge/signature handshake and returns a ready-to-use transport.
 func Dial(ctx context.Context, url string, secret *base.NodeSecret, opts ...Option) (*RelayConn, error) {
-	var o options
-	for _, opt := range opts {
-		opt(&o)
+	var option options
+	for _, optionFn := range opts {
+		optionFn(&option)
 	}
-	if o.batchSize == 0 {
-		o.batchSize = defaultBatchSize
+	if option.batchSize == 0 {
+		option.batchSize = defaultBatchSize
 	}
-	if o.batchCount == 0 {
-		o.batchCount = defaultBatchCount
+	if option.batchCount == 0 {
+		option.batchCount = defaultBatchCount
 	}
-	if o.drainDelay == 0 {
-		o.drainDelay = defaultDrainDelay
+	if option.drainDelay == 0 {
+		option.drainDelay = defaultDrainDelay
 	}
-	if o.keepaliveInterval == 0 {
-		o.keepaliveInterval = pingInterval
+	if option.keepaliveInterval == 0 {
+		option.keepaliveInterval = pingInterval
 	}
-	if o.keepaliveTimeout == 0 {
-		o.keepaliveTimeout = pingTimeout
+	if option.keepaliveTimeout == 0 {
+		option.keepaliveTimeout = pingTimeout
+	}
+	if err := validateRelayURL(url); err != nil {
+		return nil, err
 	}
 
 	ws, _, err := websocket.Dial(ctx, url+relayPath, &websocket.DialOptions{
-		Subprotocols: []string{proto.RelayProtocolV2},
+		Subprotocols: []string{proto.RelayProtocol},
 	})
 	if err != nil {
 		return nil, err
 	}
-	if ws.Subprotocol() != proto.RelayProtocolV2 {
+	if ws.Subprotocol() != proto.RelayProtocol {
 		ws.Close(websocket.StatusPolicyViolation, "unsupported relay protocol")
 		return nil, errors.New("relay: unsupported subprotocol")
 	}
-	observedIP, err := clientHandshake(ctx, ws, secret)
+	observedIP, err := clientHandshake(ctx, ws, secret, option.announceAddrs)
 	if err != nil {
 		ws.Close(websocket.StatusPolicyViolation, err.Error())
 		return nil, err
@@ -199,17 +239,19 @@ func Dial(ctx context.Context, url string, secret *base.NodeSecret, opts ...Opti
 		cancel:     cancel,
 		localAddr:  &net.UDPAddr{IP: net.IPv6loopback},
 		closed:     make(chan struct{}),
-		q:          make(chan datagram, 256),
+		q:          make(chan *batchEntry, 1024),
 		deadlineCh: make(chan struct{}),
-		lookups:    make(map[base.NodeID]chan []*net.UDPAddr),
 		observed:   observedIP,
-		batchSize:  o.batchSize,
-		batchCount: o.batchCount,
-		drainDelay: o.drainDelay,
+		batchSize:  option.batchSize,
+		batchCount: option.batchCount,
+		drainDelay: option.drainDelay,
 		pending:    make(map[batchKey]*batch),
+		relayURLs:  make(map[base.NodeID]string),
 
-		pingInterval: o.keepaliveInterval,
-		pingTimeout:  o.keepaliveTimeout,
+		holePunchHandler: option.holePunchHandler,
+
+		pingInterval: option.keepaliveInterval,
+		pingTimeout:  option.keepaliveTimeout,
 	}
 	c.lastRecvNano.Store(time.Now().UnixNano()) // base for the keepalive watchdog
 	go c.readLoop()
@@ -221,227 +263,234 @@ func Dial(ctx context.Context, url string, secret *base.NodeSecret, opts ...Opti
 // ObservedIP returns this client's address as seen by the relay (its public
 // IP, or its LAN IP when the relay is local). It is nil until the relay has
 // reported it, and is used to recognize candidates that point at our own NAT.
-func (c *RelayConn) ObservedIP() net.IP {
-	return c.observed
+func (conn *RelayConn) ObservedIP() net.IP {
+	return conn.observed
 }
 
-// clientHandshake runs the relay auth protocol: receive the challenge,
-// sign a blake3-derived key of it, await confirmation. It also reads the
-// ObservedAddr frame the relay sends right after the confirmation and returns
-// the reported IP.
-func clientHandshake(ctx context.Context, ws *websocket.Conn, secret *base.NodeSecret) (net.IP, error) {
-	typ, msg, err := ws.Read(ctx)
+// PingRTT returns the most recent relay round-trip time, or 0 if no pong has
+// been received yet. Useful for relay selection.
+func (conn *RelayConn) PingRTT() time.Duration {
+	return time.Duration(conn.lastRTTNano.Load())
+}
+
+// scheduleRestart honors the relay's restart advisory: after reconnectIn the
+// connection is torn down (surfacing it to the watcher via Closed) so the
+// endpoint reconnects, possibly to another relay. The delay is capped so a
+// misbehaving relay cannot stall us indefinitely.
+func (conn *RelayConn) scheduleRestart(d time.Duration) {
+	if d > 5*time.Second {
+		d = 5 * time.Second
+	}
+	time.AfterFunc(d, func() {
+		conn.ws.CloseNow()
+		close(conn.closed)
+	})
+}
+
+// clientHandshake runs the relay auth protocol with exactly three messages:
+// it receives the server's ServerHello challenge, sends a ClientHello carrying
+// its identity, signature and announced addresses, and awaits Finished. It
+// returns the relay-reported observed IP (nil if the relay did not report one).
+func clientHandshake(ctx context.Context, ws *websocket.Conn, secret *base.NodeSecret, announce []string) (net.IP, error) {
+	wsMessageType, wsMessage, err := ws.Read(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if typ != websocket.MessageBinary {
-		return nil, errors.New("relay: expected binary challenge")
+	if wsMessageType != websocket.MessageBinary {
+		return nil, errors.New("relay: expected binary server hello")
 	}
-	tag, payload, err := proto.Parse(msg)
-	if err != nil {
+	var hello proto.ServerHello
+	if err := proto.Unmarshal(wsMessage, &hello); err != nil {
 		return nil, err
-	}
-	if tag != proto.ServerChallenge || len(payload) != 16 {
-		return nil, errors.New("relay: expected server challenge")
 	}
 
 	var key [32]byte
-	blake3.DeriveKey(proto.HandshakeDomainSep, payload, key[:])
+	blake3.DeriveKey(proto.HandshakeDomainSep, hello.Challenge[:], key[:])
 	sig := secret.Sign(key[:])
-	if err := ws.Write(ctx, websocket.MessageBinary, proto.EncodeClientAuth(secret.Public(), sig)); err != nil {
+	auth, err := proto.Encode(proto.ClientHello{ID: secret.Public(), Sig: sig, Addrs: announce})
+	if err != nil {
+		return nil, err
+	}
+	if err := ws.Write(ctx, websocket.MessageBinary, auth); err != nil {
 		return nil, err
 	}
 
-	typ, msg, err = ws.Read(ctx)
+	wsMessageType, wsMessage, err = ws.Read(ctx)
 	if err != nil {
 		return nil, err
 	}
-	tag, _, err = proto.Parse(msg)
-	if err != nil {
+	if wsMessageType != websocket.MessageBinary {
+		return nil, errors.New("relay: expected finished")
+	}
+	var finished proto.Finished
+	if err := proto.Unmarshal(wsMessage, &finished); err != nil {
 		return nil, err
 	}
-	switch tag {
-	case proto.ServerConfirmsAuth:
-	case proto.ServerDeniesAuth:
+	if !finished.Result {
 		return nil, errors.New("relay: authentication denied")
-	default:
-		return nil, errors.New("relay: unexpected frame during handshake")
 	}
-
-	// The relay immediately follows the confirmation with our observed
-	// address, so it is available before any Connect happens.
-	typ, msg, err = ws.Read(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if typ != websocket.MessageBinary {
-		return nil, errors.New("relay: expected observed address")
-	}
-	tag, payload, err = proto.Parse(msg)
-	if err != nil {
-		return nil, err
-	}
-	if tag != proto.ObservedAddr {
-		return nil, errors.New("relay: expected observed address")
-	}
-	return proto.ParseObservedAddr(payload)
+	return finished.Observed, nil
 }
 
 // readLoop decodes incoming frames and dispatches datagrams to ReadFrom. It
 // also answers relay keep-alive pings, as the protocol requires.
-func (c *RelayConn) readLoop() {
-	defer close(c.closed)
+func (conn *RelayConn) readLoop() {
+	restarting := false // a restart advisory owns closing c.closed
+	defer func() {
+		if !restarting {
+			close(conn.closed)
+		}
+	}()
 	for {
-		typ, msg, err := c.ws.Read(c.ctx)
+		wsMessageType, wsMessage, err := conn.ws.Read(conn.ctx)
 		if err != nil {
 			return
 		}
-		c.lastRecvNano.Store(time.Now().UnixNano())
-		if typ != websocket.MessageBinary {
+		conn.lastRecvNano.Store(time.Now().UnixNano())
+		if wsMessageType != websocket.MessageBinary {
 			continue
 		}
-		tag, payload, err := proto.Parse(msg)
-		if err != nil {
+		var v any
+		if err := proto.Unmarshal(wsMessage, &v); err != nil {
 			continue
 		}
-		switch tag {
-		case proto.RelayToClient:
-			d, err := proto.ParseDatagram(payload)
-			if err != nil {
-				continue
-			}
+		switch m := v.(type) {
+		case proto.RelayToClientBatch:
 			select {
-			case c.q <- datagram{src: d.Remote, ecn: d.Ecn, data: d.Pkt}:
+			case conn.q <- &batchEntry{remote: m.Remote, ecn: m.Ecn, packets: m.Packets}:
 			default: // queue full: drop, like a UDP socket would
 			}
-		case proto.RelayToClientBatch:
-			b, err := proto.ParseDatagramBatch(payload)
-			if err != nil {
-				continue
-			}
-			for _, pkt := range b.Packets() {
-				select {
-				case c.q <- datagram{src: b.Remote, ecn: b.Ecn, data: pkt}:
-				default: // queue full: drop, like a UDP socket would
-				}
-			}
 		case proto.Ping:
-			if len(payload) == 8 {
-				var p [8]byte
-				copy(p[:], payload)
-				_ = c.writeFrame(proto.EncodePong(p))
+			frame, err := proto.Encode(proto.Pong{Nonce: m.Nonce})
+			if err == nil {
+				_ = conn.writeFrame(frame)
 			}
-		case proto.EndpointList:
-			id, addrs, err := proto.ParseEndpointList(payload)
-			if err != nil {
-				continue
+		case proto.Pong:
+			sent := int64(binary.LittleEndian.Uint64(m.Nonce[:]))
+			conn.lastRTTNano.Store(time.Now().UnixNano() - sent)
+		case proto.Restarting:
+			// The relay is restarting: surface the outage only after the
+			// advised delay, so clients reconnect in a smear rather than all
+			// at once.
+			restarting = true
+			conn.scheduleRestart(m.ReconnectAfter)
+			return
+		case proto.HolePunch:
+			if conn.holePunchHandler != nil {
+				addrs := make([]*net.UDPAddr, 0, len(m.Addrs))
+				for _, s := range m.Addrs {
+					if a, err := net.ResolveUDPAddr("udp", s); err == nil {
+						addrs = append(addrs, a)
+					}
+				}
+				conn.holePunchHandler(m.Target, addrs)
 			}
-			c.lookupsMu.Lock()
-			ch, ok := c.lookups[id]
-			delete(c.lookups, id)
-			c.lookupsMu.Unlock()
-			if ok {
-				ch <- addrs
-			}
-		case proto.EndpointGone, proto.Status:
-			// no-op in this MVP (surfaced later for path management).
 		}
 	}
 }
 
-func (c *RelayConn) writeFrame(frame []byte) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	return c.ws.Write(c.ctx, websocket.MessageBinary, frame)
+func (conn *RelayConn) writeFrame(frame []byte) error {
+	conn.writeMu.Lock()
+	defer conn.writeMu.Unlock()
+	return conn.ws.Write(conn.ctx, websocket.MessageBinary, frame)
 }
 
-// SetEndpoints announces this client's reachable direct addresses to the
-// relay, which stores them for other nodes to discover.
-func (c *RelayConn) SetEndpoints(addrs []*net.UDPAddr) error {
-	if len(addrs) > proto.MaxEndpoints {
-		addrs = addrs[:proto.MaxEndpoints]
+// RequestHolePunch asks the relay to coordinate a direct connection to peer:
+// the relay notifies both the peer and us with each other's direct addresses,
+// so both sides can punch through their NATs simultaneously.
+func (conn *RelayConn) RequestHolePunch(peer base.NodeID) error {
+	frame, err := proto.Encode(proto.HolePunchRequest{Target: peer})
+	if err != nil {
+		return err
 	}
-	return c.writeFrame(proto.EncodeSetEndpoints(addrs))
+	return conn.writeFrame(frame)
 }
 
-// Lookup asks the relay for another node's direct addresses.
-func (c *RelayConn) Lookup(ctx context.Context, peer base.NodeID) ([]*net.UDPAddr, error) {
-	ch := make(chan []*net.UDPAddr, 1)
-	c.lookupsMu.Lock()
-	if prev, ok := c.lookups[peer]; ok {
-		close(prev) // only one outstanding lookup per peer
+// SetPeerRelay tells the relay where the given peer lives. When set, outbound
+// packets for peer are tagged with relayURL so the relaying server can forward
+// them over the backbone to that relay. An empty URL clears the hint (the peer
+// is assumed to be on this relay).
+func (conn *RelayConn) SetPeerRelay(peer base.NodeID, relayURL string) {
+	conn.relayMu.Lock()
+	if relayURL == "" {
+		delete(conn.relayURLs, peer)
+	} else {
+		conn.relayURLs[peer] = relayURL
 	}
-	c.lookups[peer] = ch
-	c.lookupsMu.Unlock()
+	conn.relayMu.Unlock()
+}
 
-	if err := c.writeFrame(proto.EncodeGetEndpoints(peer)); err != nil {
-		c.lookupsMu.Lock()
-		delete(c.lookups, peer)
-		c.lookupsMu.Unlock()
-		return nil, err
+// UpdateAnnounceAddrs publishes a refreshed set of direct addresses to the
+// relay, updating the directory entry tied to this live connection. An empty
+// slice clears the announced addresses.
+func (conn *RelayConn) UpdateAnnounceAddrs(addrs []string) error {
+	frame, err := proto.Encode(proto.LocalAddrs{Addrs: addrs})
+	if err != nil {
+		return err
 	}
-
-	select {
-	case addrs, ok := <-ch:
-		if !ok {
-			return nil, errors.New("relay: lookup cancelled")
-		}
-		return addrs, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-c.closed:
-		return nil, io.EOF
-	}
+	return conn.writeFrame(frame)
 }
 
 // WriteTo tunnels a QUIC packet destined for the peer in addr. Unless
 // batching is disabled, packets are buffered briefly and sent as a batch
 // frame to cut per-packet overhead.
-func (c *RelayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+func (conn *RelayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	pa, ok := addr.(base.PeerAddr)
 	if !ok {
 		return 0, errors.New("relay: write to a non-peer address")
 	}
-	if c.batchSize <= 0 {
-		frame := proto.EncodeDatagram(nil, proto.ClientToRelay, pa.ID, 0, p)
-		if err := c.writeFrame(frame); err != nil {
+	conn.relayMu.RLock()
+	relay := conn.relayURLs[pa.ID]
+	conn.relayMu.RUnlock()
+	if conn.batchSize <= 0 {
+		frame, err := proto.Encode(proto.ClientToRelayBatch{
+			Remote: pa.ID, Relay: relay, Packets: [][]byte{p},
+		})
+		if err != nil {
+			return 0, err
+		}
+		if err := conn.writeFrame(frame); err != nil {
 			return 0, err
 		}
 		return len(p), nil
 	}
-	c.enqueue(pa.ID, p)
+	conn.enqueue(pa.ID, relay, p)
 	return len(p), nil
 }
 
-// enqueue buffers a packet into its (dst, size) bucket, flushing immediately
-// once a bucket reaches the configured size or count limits.
-func (c *RelayConn) enqueue(dst base.NodeID, p []byte) {
-	key := batchKey{dst: dst, size: len(p)}
-	c.batchMu.Lock()
-	b := c.pending[key]
+// enqueue buffers a packet into its destination's bucket, flushing immediately
+// once a bucket reaches the configured size or count limits. The packet bytes
+// are copied: quic-go may reuse the buffer it passed to WriteTo as soon as the
+// call returns, and we only marshal the batch later.
+func (conn *RelayConn) enqueue(dst base.NodeID, relay string, p []byte) {
+	key := batchKey{dst: dst, relay: relay}
+	pkt := append([]byte(nil), p...)
+	conn.batchMu.Lock()
+	b := conn.pending[key]
 	if b == nil {
 		b = &batch{}
-		c.pending[key] = b
+		conn.pending[key] = b
 	}
-	b.contents = append(b.contents, p...)
+	b.packets = append(b.packets, pkt)
 	b.count++
-	full := b.count >= c.batchCount || len(b.contents) >= c.batchSize
-	c.batchMu.Unlock()
+	b.bytes += len(pkt)
+	full := b.count >= conn.batchCount || b.bytes >= conn.batchSize
+	conn.batchMu.Unlock()
 	if full {
-		c.flushPending()
+		conn.flushPending()
 	}
 }
 
 // flusher periodically drains buffered packets into batch frames.
-func (c *RelayConn) flusher() {
-	tick := time.NewTicker(c.drainDelay)
+func (conn *RelayConn) flusher() {
+	tick := time.NewTicker(conn.drainDelay)
 	defer tick.Stop()
 	for {
 		select {
-		case <-c.ctx.Done():
+		case <-conn.ctx.Done():
 			return // Close() flushes synchronously before cancelling
 		case <-tick.C:
-			c.flushPending()
+			conn.flushPending()
 		}
 	}
 }
@@ -449,19 +498,22 @@ func (c *RelayConn) flusher() {
 // watchdog pings the relay periodically and force-closes the connection if no
 // frame at all has been received for pingTimeout, so a silently-dead relay is
 // detected and surfaced via Closed().
-func (c *RelayConn) watchdog() {
-	tick := time.NewTicker(c.pingInterval)
+func (conn *RelayConn) watchdog() {
+	tick := time.NewTicker(conn.pingInterval)
 	defer tick.Stop()
 	for {
 		select {
-		case <-c.ctx.Done():
+		case <-conn.ctx.Done():
 			return
 		case <-tick.C:
 			var p [8]byte
 			binary.LittleEndian.PutUint64(p[:], uint64(time.Now().UnixNano()))
-			_ = c.writeFrame(proto.EncodePing(p))
-			if time.Since(time.Unix(0, c.lastRecvNano.Load())) > c.pingTimeout {
-				c.ws.CloseNow()
+			frame, err := proto.Encode(proto.Ping{Nonce: p})
+			if err == nil {
+				_ = conn.writeFrame(frame)
+			}
+			if time.Since(time.Unix(0, conn.lastRecvNano.Load())) > conn.pingTimeout {
+				conn.ws.CloseNow()
 				return
 			}
 		}
@@ -469,45 +521,71 @@ func (c *RelayConn) watchdog() {
 }
 
 // flushPending sends all buffered packets as batch frames.
-func (c *RelayConn) flushPending() {
-	c.batchMu.Lock()
-	if len(c.pending) == 0 {
-		c.batchMu.Unlock()
+func (conn *RelayConn) flushPending() {
+	conn.batchMu.Lock()
+	if len(conn.pending) == 0 {
+		conn.batchMu.Unlock()
 		return
 	}
-	pending := c.pending
-	c.pending = make(map[batchKey]*batch)
-	c.batchMu.Unlock()
+	pending := conn.pending
+	conn.pending = make(map[batchKey]*batch)
+	conn.batchMu.Unlock()
 
 	for k, b := range pending {
-		frame := proto.EncodeDatagramBatch(nil, proto.ClientToRelayBatch, k.dst, 0, uint16(k.size), b.contents)
-		_ = c.writeFrame(frame)
+		frame, err := proto.Encode(proto.ClientToRelayBatch{
+			Remote:  k.dst,
+			Relay:   k.relay,
+			Packets: b.packets,
+		})
+		if err == nil {
+			_ = conn.writeFrame(frame)
+		}
 	}
 }
 
 // ReadFrom returns the next QUIC packet received from a peer. The returned
-// addr is a base.PeerAddr carrying the sender's NodeID.
-func (c *RelayConn) ReadFrom(p []byte) (int, net.Addr, error) {
+// addr is a base.PeerAddr carrying the sender's NodeID. Packets are served one
+// at a time from the current batch (see batchEntry), so a batch frame is
+// coalesced into a single queue entry while still satisfying quic-go's
+// one-packet-per-call ReadFrom contract.
+func (conn *RelayConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	for {
-		c.readDeadlineMu.Lock()
-		deadlineCh := c.deadlineCh
-		var fired <-chan struct{}
-		if !c.readDeadline.IsZero() {
-			switch wait := time.Until(c.readDeadline); {
-			case wait <= 0:
-				fired = deadlineFired
-			default:
-				fired = newTimeout(wait).ch
+		conn.readMu.Lock()
+		cur := conn.cur
+		conn.readMu.Unlock()
+
+		if cur != nil {
+			if n := cur.serve(p); n > 0 {
+				return n, base.PeerAddr{ID: cur.remote}, nil
 			}
+			// Batch exhausted: fetch the next one.
+			conn.readMu.Lock()
+			conn.cur = nil
+			conn.readMu.Unlock()
 		}
-		c.readDeadlineMu.Unlock()
+
+		conn.readDeadlineMu.Lock()
+		deadlineCh := conn.deadlineCh
+		var fired <-chan time.Time
+		if !conn.readDeadline.IsZero() {
+			// A deadline in the past fires immediately; a future one fires
+			// after waiting. time.After's timer is GC-recovered when abandoned
+			// (Go 1.23+), so a per-evaluation timer is cheap.
+			wait := time.Until(conn.readDeadline)
+			if wait < 0 {
+				wait = 0
+			}
+			fired = time.After(wait)
+		}
+		conn.readDeadlineMu.Unlock()
 
 		select {
-		case <-c.closed:
+		case <-conn.closed:
 			return 0, nil, io.EOF
-		case d := <-c.q:
-			n := copy(p, d.data)
-			return n, base.PeerAddr{ID: d.src}, nil
+		case d := <-conn.q:
+			conn.readMu.Lock()
+			conn.cur = d
+			conn.readMu.Unlock()
 		case <-deadlineCh: // deadline changed: re-evaluate
 		case <-fired:
 			return 0, nil, os.ErrDeadlineExceeded
@@ -516,41 +594,41 @@ func (c *RelayConn) ReadFrom(p []byte) (int, net.Addr, error) {
 }
 
 // SetDeadline sets the read deadline (write deadlines are a no-op).
-func (c *RelayConn) SetDeadline(t time.Time) error { return c.SetReadDeadline(t) }
+func (conn *RelayConn) SetDeadline(t time.Time) error { return conn.SetReadDeadline(t) }
 
 // SetReadDeadline sets the read deadline. A change immediately wakes any
 // blocked ReadFrom so quic-go can shut the listener down.
-func (c *RelayConn) SetReadDeadline(t time.Time) error {
-	c.readDeadlineMu.Lock()
-	c.readDeadline = t
-	close(c.deadlineCh)
-	c.deadlineCh = make(chan struct{})
-	c.readDeadlineMu.Unlock()
+func (conn *RelayConn) SetReadDeadline(t time.Time) error {
+	conn.readDeadlineMu.Lock()
+	conn.readDeadline = t
+	close(conn.deadlineCh)
+	conn.deadlineCh = make(chan struct{})
+	conn.readDeadlineMu.Unlock()
 	return nil
 }
 
 // SetWriteDeadline is a no-op.
-func (c *RelayConn) SetWriteDeadline(time.Time) error { return nil }
+func (conn *RelayConn) SetWriteDeadline(time.Time) error { return nil }
 
 // SetReadBuffer and SetWriteBuffer satisfy quic-go's optional buffer-resizing
 // hook; the relay's backpressure is bounded by its own queue instead.
-func (c *RelayConn) SetReadBuffer(int) error  { return nil }
-func (c *RelayConn) SetWriteBuffer(int) error { return nil }
+func (conn *RelayConn) SetReadBuffer(int) error  { return nil }
+func (conn *RelayConn) SetWriteBuffer(int) error { return nil }
 
 // Close flushes any buffered packets, then tears down the relay connection.
-func (c *RelayConn) Close() error {
-	c.flushPending()
-	c.cancel()
-	return c.ws.CloseNow()
+func (conn *RelayConn) Close() error {
+	conn.flushPending()
+	conn.cancel()
+	return conn.ws.CloseNow()
 }
 
 // Closed returns a channel that is closed when the relay connection dies
 // (read loop exits), e.g. on a network error or an explicit Close.
-func (c *RelayConn) Closed() <-chan struct{} {
-	return c.closed
+func (conn *RelayConn) Closed() <-chan struct{} {
+	return conn.closed
 }
 
 // LocalAddr returns the local address of the relay connection.
-func (c *RelayConn) LocalAddr() net.Addr { return c.localAddr }
+func (conn *RelayConn) LocalAddr() net.Addr { return conn.localAddr }
 
 var _ net.PacketConn = (*RelayConn)(nil)

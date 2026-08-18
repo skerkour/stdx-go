@@ -4,14 +4,19 @@
 // Start the relay, then:
 //
 //	# listener
-//	go run ./iron/example/echo -relay ws://127.0.0.1:3333 -mode listen
+//	go run ./iron/example/echo -relay http://127.0.0.1:3333 -mode listen
 //
 //	# dialer (use the node id printed by the listener)
-//	go run ./iron/example/echo -relay ws://127.0.0.1:3333 -mode connect -peer <node-id>
+//	go run ./iron/example/echo -relay http://127.0.0.1:3333 -mode connect -peer <node-id>
 //
-// Both endpoints contact the same relay at startup; the dialer then opens a
-// QUIC connection to the peer's NodeID, which is tunnelled through the relay
-// as plain datagrams.
+// Both endpoints contact a relay at startup; the dialer then opens a QUIC
+// connection to the peer's NodeID, which is tunnelled through the relay as
+// plain datagrams. Each endpoint announces its direct addresses to the relay it
+// is connected to (in the relay handshake). When dialing, the dialer asks its
+// relay for the peer over HTTP (the relay answers from its own clients and
+// broadcasts to the relays it is federated with), so LAN/same-host connections
+// go direct while peers on other relays are reached through the relay-to-relay
+// backbone. Use -relay-only to force all traffic through the relay.
 package main
 
 import (
@@ -30,11 +35,12 @@ import (
 
 func main() {
 	var (
-		relayURL = flag.String("relay", "ws://127.0.0.1:3333", "relay websocket url")
-		mode     = flag.String("mode", "listen", "listen or connect")
-		peer     = flag.String("peer", "", "node id to dial (connect mode)")
-		msg      = flag.String("msg", "hello from iron-go", "message to send (connect mode)")
-		key      = flag.String("key", "", "64-byte hex ed25519 private key (optional, stable node id)")
+		relayURL  = flag.String("relay", "http://127.0.0.1:3333", "relay http(s) url")
+		mode      = flag.String("mode", "listen", "listen or connect")
+		peer      = flag.String("peer", "", "node id to dial (connect mode)")
+		msg       = flag.String("msg", "hello from iron-go", "message to send (connect mode)")
+		key       = flag.String("key", "", "64-byte hex ed25519 private key (optional, stable node id)")
+		relayOnly = flag.Bool("relay-only", false, "use the relay only: no direct connections")
 	)
 	flag.Parse()
 
@@ -58,7 +64,11 @@ func main() {
 		}
 	}
 
-	endpoint, err := iron.NewEndpoint(ctx, *relayURL, secret, "")
+	opts := []iron.EndpointOption{iron.WithRelayURLs(*relayURL)}
+	if *relayOnly {
+		opts = append(opts, iron.WithRelayOnly())
+	}
+	endpoint, err := iron.NewEndpoint(ctx, secret, "", opts...)
 	if err != nil {
 		log.Fatalf("endpoint: %v", err)
 	}

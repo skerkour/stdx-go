@@ -1,319 +1,249 @@
+// Package proto defines the iron relay wire protocol.
+//
+// Every message is a single CBOR data item carrying a semantic tag (CBOR major
+// type 6) whose number IS the message type, in the private/vendor range 4200+.
+// A frame on the wire is therefore the tag head followed directly by the
+// message content — no enclosing wrapper, no double encoding. Each Go message
+// struct is registered with its tag number in a cbor.TagSet, so encoding
+// emits the tag automatically and decoding validates it; decoding into
+// cbor.Tag yields a typed *Msg for switch-style dispatch.
 package proto
 
 import (
-	"errors"
 	"net"
+	"reflect"
+	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/skerkour/stdx-go/iron/base"
 )
 
 // Relay protocol versions negotiated via the WebSocket subprotocol.
 const (
-	RelayProtocolV1 = "iron-relay-v1"
-	RelayProtocolV2 = "iron-relay-v2"
+	RelayProtocol = "iron-relay"
+	// RelayBackboneProtocol is the subprotocol a peer relay uses to establish
+	// a relay-to-relay backbone link.
+	RelayBackboneProtocol = "iron-relay-backbone"
 )
 
 // HandshakeDomainSep is the domain-separation string for the relay
 // challenge signature.
 const HandshakeDomainSep = "iron-relay handshake v1 challenge signature"
 
-// Frame tags
+// Message tags. A tag's number is the message type; values are in the
+// private/vendor CBOR tag range, above the IANA-registered tags.
 const (
-	ServerChallenge    = 0  // [16B challenge]
-	ClientAuth         = 1  // [32B pubkey][64B signature]
-	ServerConfirmsAuth = 2  // (empty payload)
-	ServerDeniesAuth   = 3  // [postcard String]
-	ClientToRelay      = 4  // [32B dst id][1B ecn][packet]
-	ClientToRelayBatch = 5  // [32B dst id][1B ecn][u16 segment][packets]
-	RelayToClient      = 6  // [32B src id][1B ecn][packet]
-	RelayToClientBatch = 7  // [32B src id][1B ecn][u16 segment][packets]
-	EndpointGone       = 8  // [32B id]
-	Ping               = 9  // [8B]
-	Pong               = 10 // [8B]
-	Status             = 13 // [1B]
+	MsgServerHello        = 4200 // relay->client   handshake step 1
+	MsgClientHello        = 4201 // client->relay   handshake step 2
+	MsgFinished           = 4202 // relay->client   handshake step 3
+	MsgClientToRelayBatch = 4204 // client->relay
+	MsgRelayToClientBatch = 4205 // relay->client
+	MsgPing               = 4206
+	MsgPong               = 4207
+	MsgRestarting         = 4208
+	MsgHolePunchRequest   = 4210 // client->relay
+	MsgHolePunch          = 4211 // relay->client
+	MsgRelayToRelayBatch  = 4212 // relay->relay  (backbone)
+	MsgLocalAddrs         = 4213 // client->relay (refresh announced addresses)
 
-	// Extension frames for direct-address discovery
-	SetEndpoints = 20 // client->relay [nn[{1B fam}{4/16B ip}{2B port BE}]]
-	GetEndpoints = 21 // client->relay [32B nodeID]
-	EndpointList = 22 // relay->client [32B nodeID][nn[...]]
-	ObservedAddr = 23 // relay->client [1B family][4/16B ip]
+	// HTTP directory API messages (POST /relay/api).
+	MsgAPILookup     = 4301
+	MsgAPILookupResp = 4302
+	MsgHello         = 4303
 )
 
+// Size limits.
 const (
-	// MaxPacketSize mirrors MAX_PACKET_SIZE: 64 KiB per datagram.
+	// MaxPacketSize is the maximum size of a single QUIC packet.
 	MaxPacketSize = 64 * 1024
-	// MaxFrameSize mirrors MAX_FRAME_SIZE: 1 MiB per websocket message.
-	MaxFrameSize = 1024 * 1024
+	// MaxEndpoints bounds the number of direct addresses a node may announce.
+	MaxEndpoints = 32
 )
 
-// Parse reads the frame tag from a received websocket message and returns
-// the tag and the remaining payload.
-func Parse(msg []byte) (uint64, []byte, error) {
-	tag, n := readVarint(msg)
-	if n == 0 {
-		return 0, nil, errors.New("invalid frame: missing tag")
-	}
-	payload := msg[n:]
-	if len(payload) > MaxFrameSize {
-		return 0, nil, errors.New("invalid frame: too large")
-	}
-	return tag, payload, nil
-}
-
-// Datagram is a single QUIC packet forwarded through the relay.
-type Datagram struct {
-	// Remote is the sender for RelayToClient frames, or the destination
-	// for ClientToRelay frames.
-	Remote base.NodeID
-	Ecn    byte
-	Pkt    []byte
-}
-
-// EncodeDatagram wraps a single QUIC packet into a one-datagram relay frame
-// with the given tag (ClientToRelay or RelayToClient).
-func EncodeDatagram(dst []byte, tag uint64, id base.NodeID, ecn byte, pkt []byte) []byte {
-	dst = appendVarint(dst, tag)
-	dst = append(dst, id[:]...)
-	dst = append(dst, ecn)
-	dst = append(dst, pkt...)
-	return dst
-}
-
-// ParseDatagram unwraps the payload of a one-datagram frame (tag 4 or 6).
-func ParseDatagram(payload []byte) (*Datagram, error) {
-	if len(payload) < base.NodeIDLen+1 {
-		return nil, errors.New("invalid datagram frame: too short")
-	}
-	var id base.NodeID
-	copy(id[:], payload[:base.NodeIDLen])
-	return &Datagram{Remote: id, Ecn: payload[base.NodeIDLen], Pkt: payload[base.NodeIDLen+1:]}, nil
-}
-
-// DatagramBatch is a set of same-sized QUIC packets forwarded through the
-// relay in one frame (tag 5 or 7). The contents are an integer number of
-// packets, each SegmentSize bytes long.
-type DatagramBatch struct {
-	// Remote is the sender for RelayToClient frames, or the destination
-	// for ClientToRelay frames.
-	Remote      base.NodeID
-	Ecn         byte
-	SegmentSize uint16
-	Contents    []byte
-}
-
-// EncodeDatagramBatch wraps a batch of same-sized packets into a relay frame
-// with the given tag (ClientToRelayBatch or RelayToClientBatch).
-func EncodeDatagramBatch(dst []byte, tag uint64, id base.NodeID, ecn byte, segmentSize uint16, contents []byte) []byte {
-	dst = appendVarint(dst, tag)
-	dst = append(dst, id[:]...)
-	dst = append(dst, ecn)
-	dst = append(dst, byte(segmentSize>>8), byte(segmentSize))
-	dst = append(dst, contents...)
-	return dst
-}
-
-// ParseDatagramBatch unwraps the payload of a batch frame (tag 5 or 7).
-func ParseDatagramBatch(payload []byte) (*DatagramBatch, error) {
-	if len(payload) < base.NodeIDLen+3 {
-		return nil, errors.New("invalid datagram batch: too short")
-	}
-	var id base.NodeID
-	copy(id[:], payload[:base.NodeIDLen])
-	ecn := payload[base.NodeIDLen]
-	segmentSize := uint16(payload[base.NodeIDLen+1])<<8 | uint16(payload[base.NodeIDLen+2])
-	contents := payload[base.NodeIDLen+3:]
-	if segmentSize == 0 || len(contents)%int(segmentSize) != 0 {
-		return nil, errors.New("invalid datagram batch: contents not a multiple of segment size")
-	}
-	return &DatagramBatch{
-		Remote:      id,
-		Ecn:         ecn,
-		SegmentSize: segmentSize,
-		Contents:    contents,
-	}, nil
-}
-
-// Packets splits a DatagramBatch into its individual packets.
-func (b *DatagramBatch) Packets() [][]byte {
-	n := len(b.Contents) / int(b.SegmentSize)
-	out := make([][]byte, 0, n)
-	for i := 0; i < n; i++ {
-		out = append(out, b.Contents[i*int(b.SegmentSize):(i+1)*int(b.SegmentSize)])
-	}
-	return out
-}
-
-// EncodeFrameTag frames a payload with the given tag.
-func EncodeFrameTag(tag uint64, payload []byte) []byte {
-	return append(appendVarint(nil, tag), payload...)
-}
-
-// EncodeServerChallenge encodes the challenge for the auth handshake.
-func EncodeServerChallenge(challenge [16]byte) []byte {
-	return EncodeFrameTag(ServerChallenge, challenge[:])
-}
-
-// EncodeClientAuth encodes the client's public identity and the signature of
-// the blake3-derived challenge key.
-func EncodeClientAuth(id base.NodeID, sig [64]byte) []byte {
-	out := appendVarint(nil, ClientAuth)
-	out = append(out, id[:]...)
-	return append(out, sig[:]...)
-}
-
-// EncodeServerConfirmsAuth encodes the successful auth confirmation.
-func EncodeServerConfirmsAuth() []byte { return EncodeFrameTag(ServerConfirmsAuth, nil) }
-
-// EncodeServerDeniesAuth encodes a denial. postcard encodes an empty String
-// as a single 0x00 length byte.
-func EncodeServerDeniesAuth() []byte { return EncodeFrameTag(ServerDeniesAuth, []byte{0}) }
-
-// EncodePing encodes a relay ping with the given 8-byte payload.
-func EncodePing(p [8]byte) []byte { return EncodeFrameTag(Ping, p[:]) }
-
-// EncodePong encodes a relay pong echoing an 8-byte ping payload.
-func EncodePong(p [8]byte) []byte { return EncodeFrameTag(Pong, p[:]) }
-
-// MaxEndpoints bounds the number of direct addresses a client may announce.
-const MaxEndpoints = 32
-
-// AppendAddr appends a single address entry: [1B family][4 or 16B ip][2B port BE].
-func AppendAddr(dst []byte, a *net.UDPAddr) []byte {
-	if ip4 := a.IP.To4(); ip4 != nil {
-		dst = append(dst, 4)
-		dst = append(dst, ip4...)
-	} else {
-		ip6 := a.IP.To16()
-		if ip6 == nil {
-			ip6 = make(net.IP, 16)
+// tagSet maps each message type to its Go struct. A cbor.TagSet only allows
+// one tag number per Go type, so the two batch directions are distinct types
+// (see ClientToRelayBatch / RelayToClientBatch).
+var tagSet = func() cbor.TagSet {
+	tagSet := cbor.NewTagSet()
+	addToTagSet := func(opts cbor.TagOptions, t any, num uint64) {
+		if err := tagSet.Add(opts, reflect.TypeOf(t), num); err != nil {
+			panic("cbor: " + err.Error())
 		}
-		dst = append(dst, 16)
-		dst = append(dst, ip6...)
 	}
-	return append(dst, byte(a.Port>>8), byte(a.Port))
+	tagOptions := cbor.TagOptions{EncTag: cbor.EncTagRequired, DecTag: cbor.DecTagRequired}
+	addToTagSet(tagOptions, ServerHello{}, MsgServerHello)
+	addToTagSet(tagOptions, ClientHello{}, MsgClientHello)
+	addToTagSet(tagOptions, Finished{}, MsgFinished)
+	addToTagSet(tagOptions, ClientToRelayBatch{}, MsgClientToRelayBatch)
+	addToTagSet(tagOptions, RelayToClientBatch{}, MsgRelayToClientBatch)
+	addToTagSet(tagOptions, Ping{}, MsgPing)
+	addToTagSet(tagOptions, Pong{}, MsgPong)
+	addToTagSet(tagOptions, Restarting{}, MsgRestarting)
+	addToTagSet(tagOptions, HolePunchRequest{}, MsgHolePunchRequest)
+	addToTagSet(tagOptions, HolePunch{}, MsgHolePunch)
+	addToTagSet(tagOptions, RelayToRelayBatch{}, MsgRelayToRelayBatch)
+	addToTagSet(tagOptions, LocalAddrs{}, MsgLocalAddrs)
+	addToTagSet(tagOptions, APILookup{}, MsgAPILookup)
+	addToTagSet(tagOptions, APILookupResp{}, MsgAPILookupResp)
+	addToTagSet(tagOptions, Hello{}, MsgHello)
+	return tagSet
+}()
+
+// Encoding/decoding modes are immutable and safe for concurrent use. Core
+// Deterministic Encoding keeps map keys sorted and integers minimal, so the
+// bytes are stable for a given message (useful for the signed HTTP API).
+var (
+	encMode cbor.EncMode
+	decMode cbor.DecMode
+)
+
+func init() {
+	em, err := cbor.CoreDetEncOptions().EncModeWithTags(tagSet)
+	if err != nil {
+		panic("proto: " + err.Error())
+	}
+	encMode = em
+	dm, err := cbor.DecOptions{}.DecModeWithTags(tagSet)
+	if err != nil {
+		panic("proto: " + err.Error())
+	}
+	decMode = dm
 }
 
-// ParseAddr parses a single address entry, returning the address and the
-// number of bytes consumed.
-func ParseAddr(payload []byte) (*net.UDPAddr, int, error) {
-	if len(payload) < 3 {
-		return nil, 0, errors.New("short address entry")
-	}
-	fam := payload[0]
-	n := 0
-	var ip net.IP
-	switch fam {
-	case 4:
-		if len(payload) < 1+4+2 {
-			return nil, 0, errors.New("short ipv4 address")
-		}
-		ip = net.IP(append([]byte(nil), payload[1:5]...))
-		n = 1 + 4
-	case 16:
-		if len(payload) < 1+16+2 {
-			return nil, 0, errors.New("short ipv6 address")
-		}
-		ip = net.IP(append([]byte(nil), payload[1:17]...))
-		n = 1 + 16
-	default:
-		return nil, 0, errors.New("unknown address family")
-	}
-	port := int(payload[n])<<8 | int(payload[n+1])
-	return &net.UDPAddr{IP: ip, Port: port}, n + 2, nil
+// Message structs. Fields use integer map keys (keyasint) for compactness;
+// byte arrays marshal as CBOR byte strings.
+
+// The relay authentication handshake is exactly three messages:
+//
+//  1. ServerHello  (relay -> client): a challenge to sign.
+//  2. ClientHello  (client -> relay): identity, signature, direct addresses.
+//  3. Finished     (relay -> client): Result=true on success (with the
+//     relay-observed address), or Result=false to deny.
+//
+// Announcing the client's direct addresses in ClientHello lets the relay tie
+// them to the live connection and purge them the moment it disconnects.
+
+// ServerHello opens the handshake with a challenge the client must sign.
+type ServerHello struct {
+	Challenge [16]byte `cbor:"0,keyasint"`
 }
 
-// EncodeAddrs encodes an address list: [varint count][entries...].
-func EncodeAddrs(dst []byte, addrs []*net.UDPAddr) []byte {
-	dst = appendVarint(dst, uint64(len(addrs)))
-	for _, a := range addrs {
-		dst = AppendAddr(dst, a)
-	}
-	return dst
+// ClientHello authenticates a client: its public identity, a signature over
+// the blake3-derived handshake key, and the direct addresses it is reachable
+// at (publishing them to the relay's directory).
+type ClientHello struct {
+	ID    base.NodeID `cbor:"0,keyasint"`
+	Sig   [64]byte    `cbor:"1,keyasint"`
+	Addrs []string    `cbor:"2,keyasint"`
 }
 
-// ParseAddrs decodes the address list produced by EncodeAddrs.
-func ParseAddrs(payload []byte) ([]*net.UDPAddr, error) {
-	count, n := readVarint(payload)
-	if n == 0 {
-		return nil, errors.New("invalid address list")
-	}
-	payload = payload[n:]
-	if count > MaxEndpoints {
-		return nil, errors.New("too many addresses")
-	}
-	addrs := make([]*net.UDPAddr, 0, count)
-	for i := uint64(0); i < count; i++ {
-		a, used, err := ParseAddr(payload)
-		if err != nil {
-			return nil, err
-		}
-		payload = payload[used:]
-		addrs = append(addrs, a)
-	}
-	return addrs, nil
+// Finished is the relay's handshake answer. Result=true confirms
+// authentication and, when available, carries the address the relay observes
+// the client coming from. Result=false denies (the client is then closed).
+type Finished struct {
+	Result   bool   `cbor:"0,keyasint"`
+	Observed net.IP `cbor:"1,keyasint,omitempty"`
 }
 
-// EncodeSetEndpoints frames the client's announced direct addresses.
-func EncodeSetEndpoints(addrs []*net.UDPAddr) []byte {
-	return EncodeFrameTag(SetEndpoints, EncodeAddrs(nil, addrs))
+// ClientToRelayBatch carries one or more QUIC packets (of possibly differing
+// sizes) from a client to the relay for forwarding. Remote is the destination
+// NodeID. When the destination is connected to a different relay, Relay holds
+// that relay's URL and the relaying server forwards over the backbone.
+type ClientToRelayBatch struct {
+	Remote  base.NodeID `cbor:"0,keyasint"`
+	Ecn     byte        `cbor:"1,keyasint"`
+	Packets [][]byte    `cbor:"2,keyasint"`
+	Relay   string      `cbor:"3,keyasint,omitempty"`
 }
 
-// EncodeGetEndpoints frames a lookup request for a peer's direct addresses.
-func EncodeGetEndpoints(id base.NodeID) []byte {
-	out := appendVarint(nil, GetEndpoints)
-	return append(out, id[:]...)
+// RelayToClientBatch carries one or more QUIC packets from the relay to a
+// client. Remote is the sender.
+type RelayToClientBatch struct {
+	Remote  base.NodeID `cbor:"0,keyasint"`
+	Ecn     byte        `cbor:"1,keyasint"`
+	Packets [][]byte    `cbor:"2,keyasint"`
 }
 
-// EncodeEndpointList frames the relay's answer to GetEndpoints.
-func EncodeEndpointList(id base.NodeID, addrs []*net.UDPAddr) []byte {
-	out := appendVarint(nil, EndpointList)
-	out = append(out, id[:]...)
-	return EncodeAddrs(out, addrs)
+// RelayToRelayBatch is forwarded between relays over the backbone link.
+// Remote is the ultimate destination NodeID on the far relay; Sender is the
+// originating NodeID, which the far relay tags onto the packets it delivers.
+type RelayToRelayBatch struct {
+	Remote  base.NodeID `cbor:"0,keyasint"`
+	Sender  base.NodeID `cbor:"1,keyasint"`
+	Ecn     byte        `cbor:"2,keyasint"`
+	Packets [][]byte    `cbor:"3,keyasint"`
 }
 
-// ParseEndpointList decodes an EndpointList frame payload.
-func ParseEndpointList(payload []byte) (base.NodeID, []*net.UDPAddr, error) {
-	if len(payload) < base.NodeIDLen {
-		return base.NodeID{}, nil, errors.New("short endpoint list")
-	}
-	var id base.NodeID
-	copy(id[:], payload[:base.NodeIDLen])
-	addrs, err := ParseAddrs(payload[base.NodeIDLen:])
-	return id, addrs, err
+// LocalAddrs refreshes the announced direct addresses on an established relay
+// connection (e.g. after STUN discovery or SetAnnouncedAddrs).
+type LocalAddrs struct {
+	Addrs []string `cbor:"0,keyasint"`
 }
 
-// EncodeObservedAddr frames the relay's view of the client's source address
-// (its public IP, or its LAN IP when the relay is local). The client uses it
-// to skip dialing its own NAT's public address, which can never reach a peer.
-func EncodeObservedAddr(ip net.IP) []byte {
-	out := appendVarint(nil, ObservedAddr)
-	if ip4 := ip.To4(); ip4 != nil {
-		out = append(out, 4)
-		out = append(out, ip4...)
-	} else if ip6 := ip.To16(); ip6 != nil {
-		out = append(out, 16)
-		out = append(out, ip6...)
-	}
-	return out
+// Ping is a relay keepalive probe.
+type Ping struct {
+	Nonce [8]byte `cbor:"0,keyasint"`
 }
 
-// ParseObservedAddr decodes an ObservedAddr frame payload.
-func ParseObservedAddr(payload []byte) (net.IP, error) {
-	if len(payload) == 0 {
-		return nil, errors.New("short observed address")
-	}
-	switch payload[0] {
-	case 4:
-		if len(payload) != 1+4 {
-			return nil, errors.New("short observed address")
-		}
-		return net.IP(append([]byte(nil), payload[1:]...)), nil
-	case 16:
-		if len(payload) != 1+16 {
-			return nil, errors.New("short observed address")
-		}
-		return net.IP(append([]byte(nil), payload[1:]...)), nil
-	default:
-		return nil, errors.New("unknown address family")
-	}
+// Pong answers a Ping, echoing its nonce.
+type Pong struct {
+	Nonce [8]byte `cbor:"0,keyasint"`
+}
+
+// Restarting advises the client that the relay is restarting: reconnect after
+// ReconnectAfter (smearing the reconnect storm), trying for TryFor.
+type Restarting struct {
+	ReconnectAfter time.Duration `cbor:"0,keyasint"`
+	TryFor         time.Duration `cbor:"1,keyasint"`
+}
+
+// HolePunchRequest asks the relay to coordinate a direct connection to Target.
+type HolePunchRequest struct {
+	Target base.NodeID `cbor:"0,keyasint"`
+}
+
+// HolePunch carries the other side's direct addresses ("ip:port" strings) so
+// both ends can punch through their NATs simultaneously.
+type HolePunch struct {
+	Target base.NodeID `cbor:"0,keyasint"`
+	Addrs  []string    `cbor:"1,keyasint"`
+}
+
+// HTTP directory API messages.
+
+// APILookup asks for another node's direct addresses.
+type APILookup struct {
+	ID base.NodeID `cbor:"0,keyasint"`
+}
+
+// APILookupResp is the answer to an APILookup: the peer's direct addresses, its
+// observed public IP (empty when it is not connected to the relay) and the
+// relays that reported the peer (the answering relay's own host first, then
+// any of its peers that found the peer too).
+type APILookupResp struct {
+	Addrs       []string `cbor:"0,keyasint"`
+	Observed    string   `cbor:"1,keyasint,omitempty"`
+	FoundRelays []string `cbor:"2,keyasint"`
+}
+
+// Hello invites a peer relay to establish the backbone connection. It is sent
+// by the larger-address relay (which does not dial) to the smaller-address
+// relay, so the smaller side can dial and a pair keeps exactly one connection.
+type Hello struct {
+	Self string `cbor:"0,keyasint"`
+}
+
+// Encode returns the CBOR encoding of a message: the tag head (the message
+// type, taken from the registered TagSet) followed directly by the content.
+func Encode(msg any) ([]byte, error) {
+	return encMode.Marshal(msg)
+}
+
+// Unmarshal decodes a tagged frame into msg (a pointer to the message struct
+// or a pointer to any). The frame's tag number is validated against msg's
+// registered type (DecTagRequired), then the content is decoded exactly once.
+// Decoding into an any yields the concrete message value for registered tags,
+// which is how callers dispatch on the message kind.
+func Unmarshal(data []byte, msg any) error {
+	return decMode.Unmarshal(data, msg)
 }

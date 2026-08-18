@@ -19,22 +19,40 @@ import (
 	"github.com/skerkour/stdx-go/iron/relayserver"
 )
 
-func startRelay(t *testing.T) (string, func()) {
+func startRelay(t *testing.T) (string, *relayserver.Server, func()) {
 	t.Helper()
-	srv := relayserver.NewServer()
+	srv := relayserver.NewServer(nil)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	httpSrv := &http.Server{Handler: srv.Handler()}
 	go func() { _ = httpSrv.Serve(l) }()
+	serveUDP(t, srv, l.Addr().String())
 	stop := func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = httpSrv.Shutdown(ctx)
+		// Force-close hijacked websocket connections so clients observe the
+		// outage (http.Server.Shutdown cannot see them).
+		_ = srv.Close()
+		_ = httpSrv.Shutdown(context.Background())
 		_ = l.Close()
 	}
-	return l.Addr().String(), stop
+	return l.Addr().String(), srv, stop
+}
+
+// serveUDP binds a UDP socket on addr for the relay's STUN responder, letting
+// endpoints discover their public address for hole punching.
+func serveUDP(t *testing.T, srv *relayserver.Server, addr string) {
+	t.Helper()
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	udpConn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { udpConn.Close() })
+	srv.ServeUDP(udpConn)
 }
 
 // restartableRelay runs a relay on a fixed address and can be stopped and
@@ -42,7 +60,7 @@ func startRelay(t *testing.T) (string, func()) {
 // relayserver instance is reused across restarts.
 func restartableRelay(t *testing.T) (addr string, stop func(), restart func()) {
 	t.Helper()
-	srv := relayserver.NewServer()
+	srv := relayserver.NewServer(nil)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -50,6 +68,7 @@ func restartableRelay(t *testing.T) (addr string, stop func(), restart func()) {
 	addr = l.Addr().String()
 	httpSrv := &http.Server{Handler: srv.Handler()}
 	go func() { _ = httpSrv.Serve(l) }()
+	serveUDP(t, srv, addr)
 
 	stop = func() {
 		// Force-close hijacked websocket connections and the listener so the
@@ -83,18 +102,16 @@ func newEndpointPair(t *testing.T, ctx context.Context, relayURL string) (*iron.
 	if err != nil {
 		t.Fatal(err)
 	}
-	epA, err := iron.NewEndpoint(ctx, relayURL, secA, "")
+	epA, err := iron.NewEndpoint(ctx, secA, "", iron.WithRelayURLs(relayURL), iron.WithLogger(testLogger(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { epA.Close() })
-	epA.WithLogger(testLogger(t))
-	epB, err := iron.NewEndpoint(ctx, relayURL, secB, "")
+	epB, err := iron.NewEndpoint(ctx, secB, "", iron.WithRelayURLs(relayURL), iron.WithLogger(testLogger(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { epB.Close() })
-	epB.WithLogger(testLogger(t))
 	return epA, epB, secA, secB
 }
 
@@ -137,21 +154,39 @@ func serveEchoConn(ctx context.Context, conn *iron.Connection) {
 // echoRoundTrip writes msg on a fresh stream and reads the echo back.
 func echoRoundTrip(t *testing.T, ctx context.Context, conn *iron.Connection, msg string) {
 	t.Helper()
+	if err := echoRoundTripErr(ctx, conn, msg); err != nil {
+		t.Fatalf("echo round trip: %v", err)
+	}
+}
+
+// echoRoundTripErr is echoRoundTrip that reports errors instead of failing the
+// test, for retry loops.
+func echoRoundTripErr(ctx context.Context, conn *iron.Connection, msg string) error {
 	st, err := conn.OpenStreamSync(ctx)
 	if err != nil {
-		t.Fatalf("open stream: %v", err)
+		return err
 	}
 	if _, err := st.Write([]byte(msg)); err != nil {
-		t.Fatalf("write: %v", err)
+		return err
 	}
 	st.Close()
 	got, err := io.ReadAll(st)
 	if err != nil {
-		t.Fatalf("read echo: %v", err)
+		return err
 	}
 	if string(got) != msg {
-		t.Fatalf("echo mismatch: got %q", string(got))
+		return &echoMismatchError{want: msg, got: string(got)}
 	}
+	return nil
+}
+
+type echoMismatchError struct {
+	want string
+	got  string
+}
+
+func (e *echoMismatchError) Error() string {
+	return "echo mismatch: got " + e.got
 }
 
 func waitForPath(t *testing.T, conn *iron.Connection, want string) {
@@ -169,13 +204,13 @@ func waitForPath(t *testing.T, conn *iron.Connection, want string) {
 // TestEchoDirect verifies two endpoints with reachable direct addresses
 // connect over UDP, bypassing the relay.
 func TestEchoDirect(t *testing.T) {
-	relayAddr, stopRelay := startRelay(t)
+	relayAddr, _, stopRelay := startRelay(t)
 	defer stopRelay()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	epA, epB, secA, secB := newEndpointPair(t, ctx, "ws://"+relayAddr)
+	epA, epB, secA, secB := newEndpointPair(t, ctx, "http://"+relayAddr)
 	errCh := make(chan error, 1)
 
 	// Server side: accept, verify the client identity and the path, echo.
@@ -233,7 +268,7 @@ func TestEchoDirect(t *testing.T) {
 // TestEchoRelayFallback verifies that a peer whose direct address is
 // unreachable still connects through the relay.
 func TestEchoRelayFallback(t *testing.T) {
-	relayAddr, stopRelay := startRelay(t)
+	relayAddr, _, stopRelay := startRelay(t)
 	defer stopRelay()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -247,7 +282,7 @@ func TestEchoRelayFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	epA, err := iron.NewEndpoint(ctx, "ws://"+relayAddr, secA, "")
+	epA, err := iron.NewEndpoint(ctx, secA, "", iron.WithRelayURLs("http://"+relayAddr))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +291,7 @@ func TestEchoRelayFallback(t *testing.T) {
 	// fails. Skip its auto-announcement, otherwise a lookup could sample the
 	// real addresses before the override reaches the relay and connect
 	// directly.
-	epB, err := iron.NewEndpoint(ctx, "ws://"+relayAddr, secB, "", iron.WithSkipAnnounce())
+	epB, err := iron.NewEndpoint(ctx, secB, "", iron.WithRelayURLs("http://"+relayAddr), iron.WithSkipAnnounce())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,13 +316,13 @@ func TestEchoRelayFallback(t *testing.T) {
 // TestDirectFallbackRedial verifies that a dropped direct connection is
 // transparently re-established over the relay.
 func TestDirectFallbackRedial(t *testing.T) {
-	relayAddr, stopRelay := startRelay(t)
+	relayAddr, _, stopRelay := startRelay(t)
 	defer stopRelay()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
-	epA, epB, _, secB := newEndpointPair(t, ctx, "ws://"+relayAddr)
+	epA, epB, _, secB := newEndpointPair(t, ctx, "http://"+relayAddr)
 
 	// Single accept loop: remember the first accepted connection so the test
 	// can kill it, and echo streams on every connection.
@@ -330,15 +365,15 @@ func TestDirectFallbackRedial(t *testing.T) {
 // TestRelayRejectsBadSignature checks the relay's auth handshake refuses a
 // client that cannot prove ownership of its claimed identity.
 func TestRelayRejectsBadSignature(t *testing.T) {
-	relayAddr, stopRelay := startRelay(t)
+	relayAddr, _, stopRelay := startRelay(t)
 	defer stopRelay()
-	relayURL := "ws://" + relayAddr
+	relayURL := "http://" + relayAddr
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	ws, _, err := websocket.Dial(ctx, relayURL+"/relay", &websocket.DialOptions{
-		Subprotocols: []string{proto.RelayProtocolV2},
+		Subprotocols: []string{proto.RelayProtocol},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -352,9 +387,9 @@ func TestRelayRejectsBadSignature(t *testing.T) {
 	if typ != websocket.MessageBinary {
 		t.Fatal("expected binary challenge")
 	}
-	tag, challenge, err := proto.Parse(msg)
-	if err != nil || tag != proto.ServerChallenge {
-		t.Fatal("expected server challenge")
+	var ch proto.ServerHello
+	if err := proto.Unmarshal(msg, &ch); err != nil {
+		t.Fatal("expected server hello")
 	}
 
 	// Sign a *different* message so the signature does not verify.
@@ -363,14 +398,19 @@ func TestRelayRejectsBadSignature(t *testing.T) {
 		t.Fatal(err)
 	}
 	var key [32]byte
-	blake3.DeriveKey(proto.HandshakeDomainSep, challenge, key[:])
+	blake3.DeriveKey(proto.HandshakeDomainSep, ch.Challenge[:], key[:])
 	key[0] ^= 0xff
 	sig := secret.Sign(key[:])
-	if err := ws.Write(ctx, websocket.MessageBinary, proto.EncodeClientAuth(secret.Public(), sig)); err != nil {
+	auth, err := proto.Encode(proto.ClientHello{ID: secret.Public(), Sig: sig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.Write(ctx, websocket.MessageBinary, auth); err != nil {
 		t.Fatal(err)
 	}
 
-	// The relay must either send ServerDeniesAuth or close the connection.
+	// The relay must either send an unsuccessful Finished or close the
+	// connection.
 	typ, resp, err := ws.Read(ctx)
 	if err != nil {
 		return // closed: rejection confirmed
@@ -378,12 +418,12 @@ func TestRelayRejectsBadSignature(t *testing.T) {
 	if typ != websocket.MessageBinary {
 		t.Fatalf("unexpected frame type %d", typ)
 	}
-	tag, _, err = proto.Parse(resp)
-	if err != nil {
+	var fin proto.Finished
+	if err := proto.Unmarshal(resp, &fin); err != nil {
 		t.Fatal(err)
 	}
-	if tag != proto.ServerDeniesAuth {
-		t.Fatalf("expected denial, got frame tag %d", tag)
+	if fin.Result {
+		t.Fatalf("expected denial (Finished.Result=false)")
 	}
 }
 
@@ -400,7 +440,7 @@ func (e *unexpectedPeerError) Error() string {
 func TestRelayReconnect(t *testing.T) {
 	relayAddr, stopRelay, restartRelay := restartableRelay(t)
 	defer stopRelay()
-	relayURL := "ws://" + relayAddr
+	relayURL := "http://" + relayAddr
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -413,13 +453,13 @@ func TestRelayReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	epA, err := iron.NewEndpoint(ctx, relayURL, secA, "")
+	epA, err := iron.NewEndpoint(ctx, secA, "", iron.WithRelayURLs(relayURL))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { epA.Close() })
 	// B is reachable only via the relay.
-	epB, err := iron.NewEndpoint(ctx, relayURL, secB, "", iron.WithSkipAnnounce())
+	epB, err := iron.NewEndpoint(ctx, secB, "", iron.WithRelayURLs(relayURL), iron.WithSkipAnnounce())
 	if err != nil {
 		t.Fatal(err)
 	}
