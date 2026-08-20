@@ -21,7 +21,7 @@ func BenchmarkChaCha20(b *testing.B) {
 		dst := make([]byte, size)
 		rand.Read(src)
 
-		b.Run(fmt.Sprintf("stdlib_chacha20/%d", size), func(b *testing.B) {
+		b.Run(fmt.Sprintf("chacha20_stdlib/%d", size), func(b *testing.B) {
 			b.SetBytes(int64(size))
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -33,7 +33,7 @@ func BenchmarkChaCha20(b *testing.B) {
 			}
 		})
 
-		b.Run(fmt.Sprintf("CipherIetf/%d", size), func(b *testing.B) {
+		b.Run(fmt.Sprintf("chacha20_simd/%d", size), func(b *testing.B) {
 			b.SetBytes(int64(size))
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {

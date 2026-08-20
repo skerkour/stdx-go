@@ -63,28 +63,28 @@ func (cipher *CipherIetf) xorKeyStreamAVX512(dst, src []byte) {
 
 	// len(dst) >= 1024 is not needed but it removes bound checks
 	for len(src) >= 1024 && len(dst) >= 1024 {
-		// 16 block-major vectors, block b in o[b]
-		o0, o1, o2, o3, o4, o5, o6, o7, o8, o9, o10, o11, o12, o13, o14, o15 :=
+		// 16 block-major vectors, block b in w[b]
+		w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
 			chacha16BlocksAVX512(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, counter, i13, i14, i15)
 
 		srcPointer := unsafe.Pointer(&src[0])
 		dstPointer := unsafe.Pointer(&dst[0])
-		xorStoreBlock512(dstPointer, srcPointer, 0, o0)
-		xorStoreBlock512(dstPointer, srcPointer, 64, o1)
-		xorStoreBlock512(dstPointer, srcPointer, 128, o2)
-		xorStoreBlock512(dstPointer, srcPointer, 192, o3)
-		xorStoreBlock512(dstPointer, srcPointer, 256, o4)
-		xorStoreBlock512(dstPointer, srcPointer, 320, o5)
-		xorStoreBlock512(dstPointer, srcPointer, 384, o6)
-		xorStoreBlock512(dstPointer, srcPointer, 448, o7)
-		xorStoreBlock512(dstPointer, srcPointer, 512, o8)
-		xorStoreBlock512(dstPointer, srcPointer, 576, o9)
-		xorStoreBlock512(dstPointer, srcPointer, 640, o10)
-		xorStoreBlock512(dstPointer, srcPointer, 704, o11)
-		xorStoreBlock512(dstPointer, srcPointer, 768, o12)
-		xorStoreBlock512(dstPointer, srcPointer, 832, o13)
-		xorStoreBlock512(dstPointer, srcPointer, 896, o14)
-		xorStoreBlock512(dstPointer, srcPointer, 960, o15)
+		xorStoreBlock512(dstPointer, srcPointer, 0, w0)
+		xorStoreBlock512(dstPointer, srcPointer, 64, w1)
+		xorStoreBlock512(dstPointer, srcPointer, 128, w2)
+		xorStoreBlock512(dstPointer, srcPointer, 192, w3)
+		xorStoreBlock512(dstPointer, srcPointer, 256, w4)
+		xorStoreBlock512(dstPointer, srcPointer, 320, w5)
+		xorStoreBlock512(dstPointer, srcPointer, 384, w6)
+		xorStoreBlock512(dstPointer, srcPointer, 448, w7)
+		xorStoreBlock512(dstPointer, srcPointer, 512, w8)
+		xorStoreBlock512(dstPointer, srcPointer, 576, w9)
+		xorStoreBlock512(dstPointer, srcPointer, 640, w10)
+		xorStoreBlock512(dstPointer, srcPointer, 704, w11)
+		xorStoreBlock512(dstPointer, srcPointer, 768, w12)
+		xorStoreBlock512(dstPointer, srcPointer, 832, w13)
+		xorStoreBlock512(dstPointer, srcPointer, 896, w14)
+		xorStoreBlock512(dstPointer, srcPointer, 960, w15)
 
 		src = src[1024:]
 		dst = dst[1024:]
@@ -98,26 +98,26 @@ func (cipher *CipherIetf) xorKeyStreamAVX512(dst, src []byte) {
 	// partial block as leftover (<= 63).
 	if len(src) > 0 {
 		var keystream [1024]byte
-		o0, o1, o2, o3, o4, o5, o6, o7, o8, o9, o10, o11, o12, o13, o14, o15 :=
+		w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
 			chacha16BlocksAVX512(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, counter, i13, i14, i15)
 
 		ks := unsafe.Pointer(&keystream[0])
-		storeBlock512(ks, 0, o0)
-		storeBlock512(ks, 64, o1)
-		storeBlock512(ks, 128, o2)
-		storeBlock512(ks, 192, o3)
-		storeBlock512(ks, 256, o4)
-		storeBlock512(ks, 320, o5)
-		storeBlock512(ks, 384, o6)
-		storeBlock512(ks, 448, o7)
-		storeBlock512(ks, 512, o8)
-		storeBlock512(ks, 576, o9)
-		storeBlock512(ks, 640, o10)
-		storeBlock512(ks, 704, o11)
-		storeBlock512(ks, 768, o12)
-		storeBlock512(ks, 832, o13)
-		storeBlock512(ks, 896, o14)
-		storeBlock512(ks, 960, o15)
+		storeBlock512(ks, 0, w0)
+		storeBlock512(ks, 64, w1)
+		storeBlock512(ks, 128, w2)
+		storeBlock512(ks, 192, w3)
+		storeBlock512(ks, 256, w4)
+		storeBlock512(ks, 320, w5)
+		storeBlock512(ks, 384, w6)
+		storeBlock512(ks, 448, w7)
+		storeBlock512(ks, 512, w8)
+		storeBlock512(ks, 576, w9)
+		storeBlock512(ks, 640, w10)
+		storeBlock512(ks, 704, w11)
+		storeBlock512(ks, 768, w12)
+		storeBlock512(ks, 832, w13)
+		storeBlock512(ks, 896, w14)
+		storeBlock512(ks, 960, w15)
 
 		// min() removes bound checks
 		n := min(len(src), 1024)
@@ -139,17 +139,18 @@ func (cipher *CipherIetf) xorKeyStreamAVX512(dst, src []byte) {
 }
 
 // chacha16BlocksAVX512 computes 16 blocks of ChaCha20 key stream (20 rounds +
-// add-back) and transposes them into 16 block-major vectors: o[b] holds the
+// add-back) and transposes them into 16 block-major vectors: w[b] holds the
 // 16 words (64 bytes) of block b.
 //
 // The 16 initial-state vectors are passed in and spilled to the stack frame at
 // entry (all 16 ZMM registers are needed by the working state), then reloaded
 // at the add-back. The round loop itself spills nothing.
-func chacha16BlocksAVX512(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i13, i14, i15 archsimd.Uint32x16) (o0, o1, o2, o3, o4, o5, o6, o7, o8, o9, o10, o11, o12, o13, o14, o15 archsimd.Uint32x16) {
-	w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
+func chacha16BlocksAVX512(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i13, i14, i15 archsimd.Uint32x16) (w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 archsimd.Uint32x16) {
+	// working state
+	w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 =
 		i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i13, i14, i15
 
-	// VPROLVD count vectors, loop-invariant; loaded once and kept in registers
+	// VPROLVD count vectors loaded once and kept in registers
 	// across the round loop.
 	rotl16 := archsimd.LoadUint32x16Array(&rotlCounts[0])
 	rotl12 := archsimd.LoadUint32x16Array(&rotlCounts[1])
@@ -168,7 +169,7 @@ func chacha16BlocksAVX512(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12,
 		w3, w4, w9, w14 = quarterRoundAVX512(rotl16, rotl12, rotl8, rotl7, w3, w4, w9, w14)
 	}
 
-	// add-back
+	// add back
 	w0 = w0.Add(i0)
 	w1 = w1.Add(i1)
 	w2 = w2.Add(i2)
@@ -186,19 +187,20 @@ func chacha16BlocksAVX512(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12,
 	w14 = w14.Add(i14)
 	w15 = w15.Add(i15)
 
-	// transpose the word-major result into block-major vectors.
+	// transpose the word-major result into block-major vectors, in place.
 	// stage 1: within-lane transpose per word group
-	a0, a1, a2, a3 := transpose4AVX512(w0, w1, w2, w3)     // words 0-3
-	b0, b1, b2, b3 := transpose4AVX512(w4, w5, w6, w7)     // words 4-7
-	c0, c1, c2, c3 := transpose4AVX512(w8, w9, w10, w11)   // words 8-11
-	d0, d1, d2, d3 := transpose4AVX512(w12, w13, w14, w15) // words 12-15
+	w0, w1, w2, w3 = transpose4AVX512(w0, w1, w2, w3)         // words 0-3
+	w4, w5, w6, w7 = transpose4AVX512(w4, w5, w6, w7)         // words 4-7
+	w8, w9, w10, w11 = transpose4AVX512(w8, w9, w10, w11)     // words 8-11
+	w12, w13, w14, w15 = transpose4AVX512(w12, w13, w14, w15) // words 12-15
 
-	// stage 2: cross-lane transpose. group m gathers the word groups of blocks
-	// {0,4,8,12}+m.
-	o0, o4, o8, o12 = transpose4LanesAVX512(a0, b0, c0, d0)
-	o1, o5, o9, o13 = transpose4LanesAVX512(a1, b1, c1, d1)
-	o2, o6, o10, o14 = transpose4LanesAVX512(a2, b2, c2, d2)
-	o3, o7, o11, o15 = transpose4LanesAVX512(a3, b3, c3, d3)
+	// stage 2: cross-lane transpose. the k-th call gathers the four word groups
+	// (stage-1 vectors w[k], w[k+4], w[k+8], w[k+12]) of blocks {k, k+4, k+8,
+	// k+12} into the full 64 bytes of those blocks.
+	w0, w4, w8, w12 = transpose4LanesAVX512(w0, w4, w8, w12)
+	w1, w5, w9, w13 = transpose4LanesAVX512(w1, w5, w9, w13)
+	w2, w6, w10, w14 = transpose4LanesAVX512(w2, w6, w10, w14)
+	w3, w7, w11, w15 = transpose4LanesAVX512(w3, w7, w11, w15)
 	return
 }
 
@@ -268,12 +270,12 @@ func transpose4LanesAVX512(a, b, c, d archsimd.Uint32x16) (archsimd.Uint32x16, a
 
 // xorStoreBlock512 XORs 64 bytes of key stream (block b, held in v) with
 // src[off:off+64] and stores the result into dst[off:off+64].
-func xorStoreBlock512(dst, src unsafe.Pointer, off int, v archsimd.Uint32x16) {
-	v.Xor(archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Add(src, off)))).StoreArray((*[16]uint32)(unsafe.Add(dst, off)))
+func xorStoreBlock512(dst, src unsafe.Pointer, offset int, v archsimd.Uint32x16) {
+	v.Xor(archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Add(src, offset)))).StoreArray((*[16]uint32)(unsafe.Add(dst, offset)))
 }
 
 // storeBlock512 stores 64 bytes of key stream (block b, held in v) into
 // ks[off:off+64].
-func storeBlock512(ks unsafe.Pointer, off int, v archsimd.Uint32x16) {
-	v.StoreArray((*[16]uint32)(unsafe.Add(ks, off)))
+func storeBlock512(ks unsafe.Pointer, offset int, v archsimd.Uint32x16) {
+	v.StoreArray((*[16]uint32)(unsafe.Add(ks, offset)))
 }
