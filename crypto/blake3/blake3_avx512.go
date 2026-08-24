@@ -1,4 +1,4 @@
-//go:build amd64
+//go:build amd64 && goexperiment.simd
 
 package blake3
 
@@ -49,12 +49,19 @@ func bcast512(x uint32) archsimd.Uint32x16 {
 // gVec512 is the BLAKE3 quarter round on 16 lanes at once. The rotations are
 // right by 16/12/8/7, matching the scalar RotateLeft32(x, -k), each a single
 // VPRORVD against the loop-invariant count vectors r16/r12/r8/r7.
-func gVec512(va, vb, vc, vd, mx, my, r16, r12, r8, r7 archsimd.Uint32x16) (archsimd.Uint32x16, archsimd.Uint32x16, archsimd.Uint32x16, archsimd.Uint32x16) {
-	va = va.Add(vb).Add(mx)
+//
+// mx and my point at the lane-major message rows for the two message words of
+// this column; the message is loaded from memory here rather than passed as
+// vectors. The 16 state vectors plus the 4 rotation-count vectors already fill
+// most of the 32 ZMM registers, so keeping the 16 message words as memory
+// operands (folding into VPADDD where the compiler can) avoids spilling state,
+// matching the C reference kernel.
+func gVec512(va, vb, vc, vd archsimd.Uint32x16, mx, my *[16]uint32, r16, r12, r8, r7 archsimd.Uint32x16) (archsimd.Uint32x16, archsimd.Uint32x16, archsimd.Uint32x16, archsimd.Uint32x16) {
+	va = va.Add(vb).Add(archsimd.LoadUint32x16(mx[:]))
 	vd = vd.Xor(va).RotateRight(r16)
 	vc = vc.Add(vd)
 	vb = vb.Xor(vc).RotateRight(r12)
-	va = va.Add(vb).Add(my)
+	va = va.Add(vb).Add(archsimd.LoadUint32x16(my[:]))
 	vd = vd.Xor(va).RotateRight(r8)
 	vc = vc.Add(vd)
 	vb = vb.Xor(vc).RotateRight(r7)
@@ -65,11 +72,26 @@ func gVec512(va, vb, vc, vd, mx, my, r16, r12, r8, r7 archsimd.Uint32x16) (archs
 // indices base..base+simdLanes512-1 (lane j = chunk base+j) and writes their
 // chaining values into cvs. counterBase is the BLAKE3 chunk counter of data[0].
 //
-// The 16 message vectors and 16 state vectors are held as distinct named
-// locals (no indexed arrays) and the 7 rounds are fully unrolled with static
-// message indices; 16 state + 4 count vectors fit alongside the messages in
-// the 32 ZMM registers.
+// The message data for all 16 blocks of the batch is transposed into the
+// lane-major layout (t[b][i] lane j = word i of block b of chunk base+j) once,
+// before the block loop, so the hot loop does no scalar gather. Within the
+// loop the 16 state vectors plus the 4 rotation-count vectors are the only
+// long-lived vector values and the messages are read through gVec512's
+// memory-operand loads, avoiding the state spills of materializing all 16
+// message vectors as registers.
 func compressChunksAvx512(data []byte, base int, counterBase uint64, cvs [][8]uint32, key [8]uint32, flags uint32) {
+	// Transpose all 16 blocks once: t[b][i][j] = little-endian word i of the
+	// 64-byte block b of chunk base+j.
+	var t [16][16][simdLanesAvx512]uint32
+	for b := 0; b < 16; b++ {
+		for j := 0; j < simdLanesAvx512; j++ {
+			blk := data[(base+j)*chunkLen+b*blockLen:]
+			for i := 0; i < 16; i++ {
+				t[b][i][j] = binary.LittleEndian.Uint32(blk[i*4:])
+			}
+		}
+	}
+
 	// Per-lane chunk counters (chunk index), split into low/high 32 bits.
 	var ctrLo, ctrHi [simdLanesAvx512]uint32
 	for j := 0; j < simdLanesAvx512; j++ {
@@ -104,32 +126,6 @@ func compressChunksAvx512(data []byte, base int, counterBase uint64, cvs [][8]ui
 	// A full chunk is 16 blocks of 64 bytes; block 0 carries CHUNK_START and
 	// block 15 carries CHUNK_END, mirroring chunkState.update + output().
 	for b := 0; b < 16; b++ {
-		// Gather each chunk's 16 message words and transpose 16 chunks at a
-		// time so m[i] lane j = word i of chunk j.
-		var scratch [16][simdLanesAvx512]uint32
-		for j := 0; j < simdLanesAvx512; j++ {
-			blk := data[(base+j)*chunkLen+b*blockLen:]
-			for i := 0; i < 16; i++ {
-				scratch[i][j] = binary.LittleEndian.Uint32(blk[i*4:])
-			}
-		}
-		m0 := archsimd.LoadUint32x16(scratch[0][:])
-		m1 := archsimd.LoadUint32x16(scratch[1][:])
-		m2 := archsimd.LoadUint32x16(scratch[2][:])
-		m3 := archsimd.LoadUint32x16(scratch[3][:])
-		m4 := archsimd.LoadUint32x16(scratch[4][:])
-		m5 := archsimd.LoadUint32x16(scratch[5][:])
-		m6 := archsimd.LoadUint32x16(scratch[6][:])
-		m7 := archsimd.LoadUint32x16(scratch[7][:])
-		m8 := archsimd.LoadUint32x16(scratch[8][:])
-		m9 := archsimd.LoadUint32x16(scratch[9][:])
-		m10 := archsimd.LoadUint32x16(scratch[10][:])
-		m11 := archsimd.LoadUint32x16(scratch[11][:])
-		m12 := archsimd.LoadUint32x16(scratch[12][:])
-		m13 := archsimd.LoadUint32x16(scratch[13][:])
-		m14 := archsimd.LoadUint32x16(scratch[14][:])
-		m15 := archsimd.LoadUint32x16(scratch[15][:])
-
 		fl := flags
 		if b == 0 {
 			fl |= flagChunkStart
@@ -144,70 +140,71 @@ func compressChunksAvx512(data []byte, base int, counterBase uint64, cvs [][8]ui
 		v12, v13, v14, v15 := vCtrLo, vCtrHi, vBlockLen, bcast512(fl)
 
 		// 7 unrolled rounds; each line is one gVec512 with the static message
-		// schedule index.
+		// schedule index. The message operands are pointers into the
+		// transposed buffer, read fresh per round.
 		// round 0
-		v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m0, m1, r16, r12, r8, r7)
-		v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m2, m3, r16, r12, r8, r7)
-		v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m4, m5, r16, r12, r8, r7)
-		v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m6, m7, r16, r12, r8, r7)
-		v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m8, m9, r16, r12, r8, r7)
-		v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m10, m11, r16, r12, r8, r7)
-		v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m12, m13, r16, r12, r8, r7)
-		v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m14, m15, r16, r12, r8, r7)
+		v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &t[b][0], &t[b][1], r16, r12, r8, r7)
+		v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &t[b][2], &t[b][3], r16, r12, r8, r7)
+		v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &t[b][4], &t[b][5], r16, r12, r8, r7)
+		v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &t[b][6], &t[b][7], r16, r12, r8, r7)
+		v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &t[b][8], &t[b][9], r16, r12, r8, r7)
+		v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &t[b][10], &t[b][11], r16, r12, r8, r7)
+		v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &t[b][12], &t[b][13], r16, r12, r8, r7)
+		v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &t[b][14], &t[b][15], r16, r12, r8, r7)
 		// round 1
-		v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m2, m6, r16, r12, r8, r7)
-		v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m3, m10, r16, r12, r8, r7)
-		v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m7, m0, r16, r12, r8, r7)
-		v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m4, m13, r16, r12, r8, r7)
-		v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m1, m11, r16, r12, r8, r7)
-		v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m12, m5, r16, r12, r8, r7)
-		v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m9, m14, r16, r12, r8, r7)
-		v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m15, m8, r16, r12, r8, r7)
+		v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &t[b][2], &t[b][6], r16, r12, r8, r7)
+		v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &t[b][3], &t[b][10], r16, r12, r8, r7)
+		v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &t[b][7], &t[b][0], r16, r12, r8, r7)
+		v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &t[b][4], &t[b][13], r16, r12, r8, r7)
+		v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &t[b][1], &t[b][11], r16, r12, r8, r7)
+		v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &t[b][12], &t[b][5], r16, r12, r8, r7)
+		v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &t[b][9], &t[b][14], r16, r12, r8, r7)
+		v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &t[b][15], &t[b][8], r16, r12, r8, r7)
 		// round 2
-		v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m3, m4, r16, r12, r8, r7)
-		v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m10, m12, r16, r12, r8, r7)
-		v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m13, m2, r16, r12, r8, r7)
-		v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m7, m14, r16, r12, r8, r7)
-		v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m6, m5, r16, r12, r8, r7)
-		v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m9, m0, r16, r12, r8, r7)
-		v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m11, m15, r16, r12, r8, r7)
-		v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m8, m1, r16, r12, r8, r7)
+		v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &t[b][3], &t[b][4], r16, r12, r8, r7)
+		v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &t[b][10], &t[b][12], r16, r12, r8, r7)
+		v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &t[b][13], &t[b][2], r16, r12, r8, r7)
+		v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &t[b][7], &t[b][14], r16, r12, r8, r7)
+		v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &t[b][6], &t[b][5], r16, r12, r8, r7)
+		v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &t[b][9], &t[b][0], r16, r12, r8, r7)
+		v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &t[b][11], &t[b][15], r16, r12, r8, r7)
+		v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &t[b][8], &t[b][1], r16, r12, r8, r7)
 		// round 3
-		v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m10, m7, r16, r12, r8, r7)
-		v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m12, m9, r16, r12, r8, r7)
-		v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m14, m3, r16, r12, r8, r7)
-		v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m13, m15, r16, r12, r8, r7)
-		v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m4, m0, r16, r12, r8, r7)
-		v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m11, m2, r16, r12, r8, r7)
-		v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m5, m8, r16, r12, r8, r7)
-		v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m1, m6, r16, r12, r8, r7)
+		v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &t[b][10], &t[b][7], r16, r12, r8, r7)
+		v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &t[b][12], &t[b][9], r16, r12, r8, r7)
+		v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &t[b][14], &t[b][3], r16, r12, r8, r7)
+		v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &t[b][13], &t[b][15], r16, r12, r8, r7)
+		v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &t[b][4], &t[b][0], r16, r12, r8, r7)
+		v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &t[b][11], &t[b][2], r16, r12, r8, r7)
+		v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &t[b][5], &t[b][8], r16, r12, r8, r7)
+		v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &t[b][1], &t[b][6], r16, r12, r8, r7)
 		// round 4
-		v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m12, m13, r16, r12, r8, r7)
-		v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m9, m11, r16, r12, r8, r7)
-		v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m15, m10, r16, r12, r8, r7)
-		v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m14, m8, r16, r12, r8, r7)
-		v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m7, m2, r16, r12, r8, r7)
-		v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m5, m3, r16, r12, r8, r7)
-		v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m0, m1, r16, r12, r8, r7)
-		v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m6, m4, r16, r12, r8, r7)
+		v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &t[b][12], &t[b][13], r16, r12, r8, r7)
+		v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &t[b][9], &t[b][11], r16, r12, r8, r7)
+		v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &t[b][15], &t[b][10], r16, r12, r8, r7)
+		v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &t[b][14], &t[b][8], r16, r12, r8, r7)
+		v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &t[b][7], &t[b][2], r16, r12, r8, r7)
+		v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &t[b][5], &t[b][3], r16, r12, r8, r7)
+		v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &t[b][0], &t[b][1], r16, r12, r8, r7)
+		v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &t[b][6], &t[b][4], r16, r12, r8, r7)
 		// round 5
-		v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m9, m14, r16, r12, r8, r7)
-		v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m11, m5, r16, r12, r8, r7)
-		v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m8, m12, r16, r12, r8, r7)
-		v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m15, m1, r16, r12, r8, r7)
-		v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m13, m3, r16, r12, r8, r7)
-		v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m0, m10, r16, r12, r8, r7)
-		v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m2, m6, r16, r12, r8, r7)
-		v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m4, m7, r16, r12, r8, r7)
+		v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &t[b][9], &t[b][14], r16, r12, r8, r7)
+		v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &t[b][11], &t[b][5], r16, r12, r8, r7)
+		v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &t[b][8], &t[b][12], r16, r12, r8, r7)
+		v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &t[b][15], &t[b][1], r16, r12, r8, r7)
+		v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &t[b][13], &t[b][3], r16, r12, r8, r7)
+		v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &t[b][0], &t[b][10], r16, r12, r8, r7)
+		v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &t[b][2], &t[b][6], r16, r12, r8, r7)
+		v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &t[b][4], &t[b][7], r16, r12, r8, r7)
 		// round 6
-		v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m11, m15, r16, r12, r8, r7)
-		v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m5, m0, r16, r12, r8, r7)
-		v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m1, m9, r16, r12, r8, r7)
-		v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m8, m6, r16, r12, r8, r7)
-		v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m14, m10, r16, r12, r8, r7)
-		v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m2, m12, r16, r12, r8, r7)
-		v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m3, m4, r16, r12, r8, r7)
-		v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m7, m13, r16, r12, r8, r7)
+		v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &t[b][11], &t[b][15], r16, r12, r8, r7)
+		v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &t[b][5], &t[b][0], r16, r12, r8, r7)
+		v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &t[b][1], &t[b][9], r16, r12, r8, r7)
+		v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &t[b][8], &t[b][6], r16, r12, r8, r7)
+		v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &t[b][14], &t[b][10], r16, r12, r8, r7)
+		v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &t[b][2], &t[b][12], r16, r12, r8, r7)
+		v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &t[b][3], &t[b][4], r16, r12, r8, r7)
+		v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &t[b][7], &t[b][13], r16, r12, r8, r7)
 
 		cv0 = v0.Xor(v8)
 		cv1 = v1.Xor(v9)
@@ -284,22 +281,14 @@ func compressOutputsAvx512(out []byte, cv *[8]uint32, block *[16]uint32, blkLen,
 	iv2 := bcast512(iv[2])
 	iv3 := bcast512(iv[3])
 
-	m0 := bcast512(block[0])
-	m1 := bcast512(block[1])
-	m2 := bcast512(block[2])
-	m3 := bcast512(block[3])
-	m4 := bcast512(block[4])
-	m5 := bcast512(block[5])
-	m6 := bcast512(block[6])
-	m7 := bcast512(block[7])
-	m8 := bcast512(block[8])
-	m9 := bcast512(block[9])
-	m10 := bcast512(block[10])
-	m11 := bcast512(block[11])
-	m12 := bcast512(block[12])
-	m13 := bcast512(block[13])
-	m14 := bcast512(block[14])
-	m15 := bcast512(block[15])
+	// The message block is the same in every output block, so broadcast each
+	// word into its own 16-lane row and pass pointers to gVec512.
+	var m [16][simdLanesAvx512]uint32
+	for i := 0; i < 16; i++ {
+		for j := 0; j < simdLanesAvx512; j++ {
+			m[i][j] = block[i]
+		}
+	}
 
 	r16 := archsimd.LoadUint32x16Array(&rotCounts[0])
 	r12 := archsimd.LoadUint32x16Array(&rotCounts[1])
@@ -313,68 +302,68 @@ func compressOutputsAvx512(out []byte, cv *[8]uint32, block *[16]uint32, blkLen,
 
 	// 7 unrolled rounds; the message schedule is the same as the chunk kernel.
 	// round 0
-	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m0, m1, r16, r12, r8, r7)
-	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m2, m3, r16, r12, r8, r7)
-	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m4, m5, r16, r12, r8, r7)
-	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m6, m7, r16, r12, r8, r7)
-	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m8, m9, r16, r12, r8, r7)
-	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m10, m11, r16, r12, r8, r7)
-	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m12, m13, r16, r12, r8, r7)
-	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m14, m15, r16, r12, r8, r7)
+	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &m[0], &m[1], r16, r12, r8, r7)
+	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &m[2], &m[3], r16, r12, r8, r7)
+	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &m[4], &m[5], r16, r12, r8, r7)
+	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &m[6], &m[7], r16, r12, r8, r7)
+	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &m[8], &m[9], r16, r12, r8, r7)
+	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &m[10], &m[11], r16, r12, r8, r7)
+	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &m[12], &m[13], r16, r12, r8, r7)
+	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &m[14], &m[15], r16, r12, r8, r7)
 	// round 1
-	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m2, m6, r16, r12, r8, r7)
-	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m3, m10, r16, r12, r8, r7)
-	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m7, m0, r16, r12, r8, r7)
-	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m4, m13, r16, r12, r8, r7)
-	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m1, m11, r16, r12, r8, r7)
-	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m12, m5, r16, r12, r8, r7)
-	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m9, m14, r16, r12, r8, r7)
-	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m15, m8, r16, r12, r8, r7)
+	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &m[2], &m[6], r16, r12, r8, r7)
+	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &m[3], &m[10], r16, r12, r8, r7)
+	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &m[7], &m[0], r16, r12, r8, r7)
+	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &m[4], &m[13], r16, r12, r8, r7)
+	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &m[1], &m[11], r16, r12, r8, r7)
+	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &m[12], &m[5], r16, r12, r8, r7)
+	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &m[9], &m[14], r16, r12, r8, r7)
+	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &m[15], &m[8], r16, r12, r8, r7)
 	// round 2
-	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m3, m4, r16, r12, r8, r7)
-	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m10, m12, r16, r12, r8, r7)
-	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m13, m2, r16, r12, r8, r7)
-	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m7, m14, r16, r12, r8, r7)
-	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m6, m5, r16, r12, r8, r7)
-	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m9, m0, r16, r12, r8, r7)
-	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m11, m15, r16, r12, r8, r7)
-	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m8, m1, r16, r12, r8, r7)
+	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &m[3], &m[4], r16, r12, r8, r7)
+	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &m[10], &m[12], r16, r12, r8, r7)
+	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &m[13], &m[2], r16, r12, r8, r7)
+	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &m[7], &m[14], r16, r12, r8, r7)
+	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &m[6], &m[5], r16, r12, r8, r7)
+	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &m[9], &m[0], r16, r12, r8, r7)
+	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &m[11], &m[15], r16, r12, r8, r7)
+	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &m[8], &m[1], r16, r12, r8, r7)
 	// round 3
-	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m10, m7, r16, r12, r8, r7)
-	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m12, m9, r16, r12, r8, r7)
-	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m14, m3, r16, r12, r8, r7)
-	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m13, m15, r16, r12, r8, r7)
-	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m4, m0, r16, r12, r8, r7)
-	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m11, m2, r16, r12, r8, r7)
-	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m5, m8, r16, r12, r8, r7)
-	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m1, m6, r16, r12, r8, r7)
+	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &m[10], &m[7], r16, r12, r8, r7)
+	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &m[12], &m[9], r16, r12, r8, r7)
+	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &m[14], &m[3], r16, r12, r8, r7)
+	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &m[13], &m[15], r16, r12, r8, r7)
+	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &m[4], &m[0], r16, r12, r8, r7)
+	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &m[11], &m[2], r16, r12, r8, r7)
+	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &m[5], &m[8], r16, r12, r8, r7)
+	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &m[1], &m[6], r16, r12, r8, r7)
 	// round 4
-	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m12, m13, r16, r12, r8, r7)
-	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m9, m11, r16, r12, r8, r7)
-	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m15, m10, r16, r12, r8, r7)
-	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m14, m8, r16, r12, r8, r7)
-	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m7, m2, r16, r12, r8, r7)
-	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m5, m3, r16, r12, r8, r7)
-	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m0, m1, r16, r12, r8, r7)
-	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m6, m4, r16, r12, r8, r7)
+	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &m[12], &m[13], r16, r12, r8, r7)
+	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &m[9], &m[11], r16, r12, r8, r7)
+	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &m[15], &m[10], r16, r12, r8, r7)
+	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &m[14], &m[8], r16, r12, r8, r7)
+	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &m[7], &m[2], r16, r12, r8, r7)
+	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &m[5], &m[3], r16, r12, r8, r7)
+	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &m[0], &m[1], r16, r12, r8, r7)
+	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &m[6], &m[4], r16, r12, r8, r7)
 	// round 5
-	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m9, m14, r16, r12, r8, r7)
-	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m11, m5, r16, r12, r8, r7)
-	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m8, m12, r16, r12, r8, r7)
-	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m15, m1, r16, r12, r8, r7)
-	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m13, m3, r16, r12, r8, r7)
-	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m0, m10, r16, r12, r8, r7)
-	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m2, m6, r16, r12, r8, r7)
-	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m4, m7, r16, r12, r8, r7)
+	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &m[9], &m[14], r16, r12, r8, r7)
+	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &m[11], &m[5], r16, r12, r8, r7)
+	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &m[8], &m[12], r16, r12, r8, r7)
+	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &m[15], &m[1], r16, r12, r8, r7)
+	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &m[13], &m[3], r16, r12, r8, r7)
+	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &m[0], &m[10], r16, r12, r8, r7)
+	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &m[2], &m[6], r16, r12, r8, r7)
+	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &m[4], &m[7], r16, r12, r8, r7)
 	// round 6
-	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m11, m15, r16, r12, r8, r7)
-	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m5, m0, r16, r12, r8, r7)
-	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m1, m9, r16, r12, r8, r7)
-	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m8, m6, r16, r12, r8, r7)
-	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m14, m10, r16, r12, r8, r7)
-	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m2, m12, r16, r12, r8, r7)
-	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m3, m4, r16, r12, r8, r7)
-	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m7, m13, r16, r12, r8, r7)
+	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &m[11], &m[15], r16, r12, r8, r7)
+	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &m[5], &m[0], r16, r12, r8, r7)
+	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &m[1], &m[9], r16, r12, r8, r7)
+	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &m[8], &m[6], r16, r12, r8, r7)
+	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &m[14], &m[10], r16, r12, r8, r7)
+	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &m[2], &m[12], r16, r12, r8, r7)
+	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &m[3], &m[4], r16, r12, r8, r7)
+	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &m[7], &m[13], r16, r12, r8, r7)
 
 	// Final output XOR: state[i] ^= state[i+8], state[i+8] ^= cv[i].
 	v0 = v0.Xor(v8)
@@ -468,7 +457,8 @@ func compressOutputsAvx512(out []byte, cv *[8]uint32, block *[16]uint32, blkLen,
 // already lane-major (no transpose needed), the counter is 0, and the flags
 // carry flagParent. Only the first 8 output words (the CV) are needed.
 func compressParentsAvx512(left, right *[simdLanesAvx512][8]uint32, key [8]uint32, flags uint32) [simdLanesAvx512][8]uint32 {
-	// Lane-major message vectors: m[i] lane j = word i of parent j.
+	// Lane-major message buffer: m[i] lane j = word i of parent j. Passed as
+	// pointers to gVec512 so the messages are read from memory per round.
 	var scratch [16][simdLanesAvx512]uint32
 	for j := 0; j < simdLanesAvx512; j++ {
 		for w := 0; w < 8; w++ {
@@ -476,22 +466,6 @@ func compressParentsAvx512(left, right *[simdLanesAvx512][8]uint32, key [8]uint3
 			scratch[w+8][j] = right[j][w]
 		}
 	}
-	m0 := archsimd.LoadUint32x16(scratch[0][:])
-	m1 := archsimd.LoadUint32x16(scratch[1][:])
-	m2 := archsimd.LoadUint32x16(scratch[2][:])
-	m3 := archsimd.LoadUint32x16(scratch[3][:])
-	m4 := archsimd.LoadUint32x16(scratch[4][:])
-	m5 := archsimd.LoadUint32x16(scratch[5][:])
-	m6 := archsimd.LoadUint32x16(scratch[6][:])
-	m7 := archsimd.LoadUint32x16(scratch[7][:])
-	m8 := archsimd.LoadUint32x16(scratch[8][:])
-	m9 := archsimd.LoadUint32x16(scratch[9][:])
-	m10 := archsimd.LoadUint32x16(scratch[10][:])
-	m11 := archsimd.LoadUint32x16(scratch[11][:])
-	m12 := archsimd.LoadUint32x16(scratch[12][:])
-	m13 := archsimd.LoadUint32x16(scratch[13][:])
-	m14 := archsimd.LoadUint32x16(scratch[14][:])
-	m15 := archsimd.LoadUint32x16(scratch[15][:])
 
 	cv0 := bcast512(key[0])
 	cv1 := bcast512(key[1])
@@ -521,68 +495,68 @@ func compressParentsAvx512(left, right *[simdLanesAvx512][8]uint32, key [8]uint3
 	v15 := bcast512(flags | flagParent)
 
 	// round 0
-	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m0, m1, r16, r12, r8, r7)
-	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m2, m3, r16, r12, r8, r7)
-	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m4, m5, r16, r12, r8, r7)
-	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m6, m7, r16, r12, r8, r7)
-	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m8, m9, r16, r12, r8, r7)
-	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m10, m11, r16, r12, r8, r7)
-	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m12, m13, r16, r12, r8, r7)
-	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m14, m15, r16, r12, r8, r7)
+	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &scratch[0], &scratch[1], r16, r12, r8, r7)
+	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &scratch[2], &scratch[3], r16, r12, r8, r7)
+	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &scratch[4], &scratch[5], r16, r12, r8, r7)
+	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &scratch[6], &scratch[7], r16, r12, r8, r7)
+	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &scratch[8], &scratch[9], r16, r12, r8, r7)
+	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &scratch[10], &scratch[11], r16, r12, r8, r7)
+	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &scratch[12], &scratch[13], r16, r12, r8, r7)
+	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &scratch[14], &scratch[15], r16, r12, r8, r7)
 	// round 1
-	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m2, m6, r16, r12, r8, r7)
-	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m3, m10, r16, r12, r8, r7)
-	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m7, m0, r16, r12, r8, r7)
-	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m4, m13, r16, r12, r8, r7)
-	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m1, m11, r16, r12, r8, r7)
-	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m12, m5, r16, r12, r8, r7)
-	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m9, m14, r16, r12, r8, r7)
-	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m15, m8, r16, r12, r8, r7)
+	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &scratch[2], &scratch[6], r16, r12, r8, r7)
+	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &scratch[3], &scratch[10], r16, r12, r8, r7)
+	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &scratch[7], &scratch[0], r16, r12, r8, r7)
+	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &scratch[4], &scratch[13], r16, r12, r8, r7)
+	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &scratch[1], &scratch[11], r16, r12, r8, r7)
+	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &scratch[12], &scratch[5], r16, r12, r8, r7)
+	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &scratch[9], &scratch[14], r16, r12, r8, r7)
+	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &scratch[15], &scratch[8], r16, r12, r8, r7)
 	// round 2
-	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m3, m4, r16, r12, r8, r7)
-	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m10, m12, r16, r12, r8, r7)
-	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m13, m2, r16, r12, r8, r7)
-	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m7, m14, r16, r12, r8, r7)
-	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m6, m5, r16, r12, r8, r7)
-	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m9, m0, r16, r12, r8, r7)
-	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m11, m15, r16, r12, r8, r7)
-	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m8, m1, r16, r12, r8, r7)
+	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &scratch[3], &scratch[4], r16, r12, r8, r7)
+	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &scratch[10], &scratch[12], r16, r12, r8, r7)
+	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &scratch[13], &scratch[2], r16, r12, r8, r7)
+	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &scratch[7], &scratch[14], r16, r12, r8, r7)
+	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &scratch[6], &scratch[5], r16, r12, r8, r7)
+	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &scratch[9], &scratch[0], r16, r12, r8, r7)
+	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &scratch[11], &scratch[15], r16, r12, r8, r7)
+	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &scratch[8], &scratch[1], r16, r12, r8, r7)
 	// round 3
-	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m10, m7, r16, r12, r8, r7)
-	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m12, m9, r16, r12, r8, r7)
-	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m14, m3, r16, r12, r8, r7)
-	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m13, m15, r16, r12, r8, r7)
-	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m4, m0, r16, r12, r8, r7)
-	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m11, m2, r16, r12, r8, r7)
-	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m5, m8, r16, r12, r8, r7)
-	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m1, m6, r16, r12, r8, r7)
+	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &scratch[10], &scratch[7], r16, r12, r8, r7)
+	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &scratch[12], &scratch[9], r16, r12, r8, r7)
+	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &scratch[14], &scratch[3], r16, r12, r8, r7)
+	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &scratch[13], &scratch[15], r16, r12, r8, r7)
+	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &scratch[4], &scratch[0], r16, r12, r8, r7)
+	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &scratch[11], &scratch[2], r16, r12, r8, r7)
+	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &scratch[5], &scratch[8], r16, r12, r8, r7)
+	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &scratch[1], &scratch[6], r16, r12, r8, r7)
 	// round 4
-	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m12, m13, r16, r12, r8, r7)
-	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m9, m11, r16, r12, r8, r7)
-	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m15, m10, r16, r12, r8, r7)
-	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m14, m8, r16, r12, r8, r7)
-	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m7, m2, r16, r12, r8, r7)
-	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m5, m3, r16, r12, r8, r7)
-	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m0, m1, r16, r12, r8, r7)
-	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m6, m4, r16, r12, r8, r7)
+	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &scratch[12], &scratch[13], r16, r12, r8, r7)
+	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &scratch[9], &scratch[11], r16, r12, r8, r7)
+	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &scratch[15], &scratch[10], r16, r12, r8, r7)
+	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &scratch[14], &scratch[8], r16, r12, r8, r7)
+	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &scratch[7], &scratch[2], r16, r12, r8, r7)
+	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &scratch[5], &scratch[3], r16, r12, r8, r7)
+	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &scratch[0], &scratch[1], r16, r12, r8, r7)
+	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &scratch[6], &scratch[4], r16, r12, r8, r7)
 	// round 5
-	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m9, m14, r16, r12, r8, r7)
-	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m11, m5, r16, r12, r8, r7)
-	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m8, m12, r16, r12, r8, r7)
-	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m15, m1, r16, r12, r8, r7)
-	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m13, m3, r16, r12, r8, r7)
-	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m0, m10, r16, r12, r8, r7)
-	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m2, m6, r16, r12, r8, r7)
-	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m4, m7, r16, r12, r8, r7)
+	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &scratch[9], &scratch[14], r16, r12, r8, r7)
+	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &scratch[11], &scratch[5], r16, r12, r8, r7)
+	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &scratch[8], &scratch[12], r16, r12, r8, r7)
+	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &scratch[15], &scratch[1], r16, r12, r8, r7)
+	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &scratch[13], &scratch[3], r16, r12, r8, r7)
+	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &scratch[0], &scratch[10], r16, r12, r8, r7)
+	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &scratch[2], &scratch[6], r16, r12, r8, r7)
+	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &scratch[4], &scratch[7], r16, r12, r8, r7)
 	// round 6
-	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, m11, m15, r16, r12, r8, r7)
-	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, m5, m0, r16, r12, r8, r7)
-	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, m1, m9, r16, r12, r8, r7)
-	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, m8, m6, r16, r12, r8, r7)
-	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, m14, m10, r16, r12, r8, r7)
-	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, m2, m12, r16, r12, r8, r7)
-	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, m3, m4, r16, r12, r8, r7)
-	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, m7, m13, r16, r12, r8, r7)
+	v0, v4, v8, v12 = gVec512(v0, v4, v8, v12, &scratch[11], &scratch[15], r16, r12, r8, r7)
+	v1, v5, v9, v13 = gVec512(v1, v5, v9, v13, &scratch[5], &scratch[0], r16, r12, r8, r7)
+	v2, v6, v10, v14 = gVec512(v2, v6, v10, v14, &scratch[1], &scratch[9], r16, r12, r8, r7)
+	v3, v7, v11, v15 = gVec512(v3, v7, v11, v15, &scratch[8], &scratch[6], r16, r12, r8, r7)
+	v0, v5, v10, v15 = gVec512(v0, v5, v10, v15, &scratch[14], &scratch[10], r16, r12, r8, r7)
+	v1, v6, v11, v12 = gVec512(v1, v6, v11, v12, &scratch[2], &scratch[12], r16, r12, r8, r7)
+	v2, v7, v8, v13 = gVec512(v2, v7, v8, v13, &scratch[3], &scratch[4], r16, r12, r8, r7)
+	v3, v4, v9, v14 = gVec512(v3, v4, v9, v14, &scratch[7], &scratch[13], r16, r12, r8, r7)
 
 	// CV update: word i = v[i]^v[i+8], then scatter across the 16 parents.
 	v0 = v0.Xor(v8)
