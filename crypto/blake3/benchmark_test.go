@@ -4,18 +4,38 @@ import (
 	"strconv"
 	"testing"
 
+	zeeboblake3 "github.com/zeebo/blake3"
+	lukeblake3 "lukechampine.com/blake3"
+
 	"github.com/skerkour/stdx-go/crypto/blake3"
 )
 
+// BenchmarkSum256 compares this implementation against the two hand-written
+// assembly reference implementations (zeebo/blake3 and lukechampine/blake3)
+// across input sizes, so the intrinsics-based kernel's throughput can be
+// judged against the machine ceiling. Both references use AVX-512 where
+// available and AVX2 otherwise.
 func BenchmarkSum256(b *testing.B) {
 	data := make([]byte, 1<<20)
+	impls := []struct {
+		name string
+		fn   func([]byte) [32]byte
+	}{
+		{"stdx-go", blake3.Sum256},
+		{"zeebo", zeeboblake3.Sum256},
+		{"lukechampine", lukeblake3.Sum256},
+	}
 	for size := 64; size <= 1<<20; size *= 64 {
 		b.Run(strconv.Itoa(size), func(b *testing.B) {
-			b.SetBytes(int64(size))
 			in := data[:size]
-			b.ResetTimer()
-			for b.Loop() {
-				blake3.Sum256(in)
+			for _, impl := range impls {
+				b.Run(impl.name, func(b *testing.B) {
+					b.SetBytes(int64(size))
+					b.ResetTimer()
+					for b.Loop() {
+						impl.fn(in)
+					}
+				})
 			}
 		})
 	}
