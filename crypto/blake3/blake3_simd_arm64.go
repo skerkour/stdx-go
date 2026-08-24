@@ -42,6 +42,17 @@ func fillChunkCVs(data []byte, cvs [][8]uint32, base uint64, key [8]uint32, flag
 	}
 }
 
+// fillChunkCV15 computes the chaining value of a full chunk after its first 15
+// blocks (the inputCV of its CHUNK_END block) for the last chunk's output node.
+// The NEON kernel has no partial-block mode, so this uses the scalar kernel.
+// Feeding all 16 blocks compresses the first 15 and leaves the last in the
+// buffer, exactly like a full chunkState.update.
+func fillChunkCV15(data []byte, cvs [][8]uint32, base uint64, key [8]uint32, flags uint32) {
+	cs := newChunkState(key, base, flags)
+	cs.update(data[:16*blockLen])
+	cvs[0] = cs.cv
+}
+
 // compressOutputs fills out with the extendable root output, simdLanes blocks
 // per NEON batch. Each output block uses a distinct counter (the per-lane
 // counter vectors) against the same message block and input CV.

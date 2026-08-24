@@ -224,6 +224,11 @@ func wordsFromLE(b []byte) [16]uint32 {
 // large the input is.
 const stackCVs = 32
 
+// xofBufLen is the length of the XofReader's cache buffer, one AVX-512 batch
+// (16 output blocks) so extendable output uses the widest SIMD kernel where
+// available; other backends process it in their own batch sizes.
+const xofBufLen = 1024
+
 // compressChunkCV computes the chaining value of the full 1024-byte chunk at
 // index i (data[i*chunkLen:(i+1)*chunkLen]) with the given key and base flags.
 // base is the BLAKE3 chunk counter of data[0]; the compression counter of chunk
@@ -359,28 +364,22 @@ func hashAll(data []byte, key [8]uint32, flags uint32) output {
 	stack := Hasher{key: key, flags: flags, chunk: newChunkState(key, 0, flags)}
 
 	var last output
-	if n%chunkLen == 0 && nChunks-1 < simdLanes {
-		// Last chunk is full and the first nChunks-1 chunks are fewer than one
-		// SIMD batch (the small exact-multiple cliff), so folding them alone
-		// would stay scalar. Instead hash all nChunks with the SIMD kernel
-		// (folding the first nChunks-1 into the tree), then build the last
-		// chunk's output node with the scalar chunk state. The last chunk is
-		// compressed twice (once in the SIMD batch, once here for its node),
-		// but that is cheaper than hashing all of the first nChunks-1 scalar.
-		lastIdx := nChunks - 1
-		var buf [stackCVs][8]uint32
-		for start := 0; start < nChunks; start += stackCVs {
-			m := min(nChunks-start, stackCVs)
-			fillChunkCVs(data[start*chunkLen:], buf[:m], uint64(start), key, flags)
-			for i := 0; i < m; i++ {
-				if start+i != lastIdx {
-					stack.pushSubtree(buf[i], 0)
-				}
-			}
+	if n%chunkLen == 0 {
+		// All chunks full. Hash every chunk with the SIMD kernel, fold the first
+		// nChunks-1 into the tree, and build the last chunk's output node
+		// directly from its CV after the first 15 blocks and its final block —
+		// the inputCV of the CHUNK_END block — so no chunk is hashed twice.
+		first := nChunks - 1
+		stack.foldChunkCVs(data[:first*chunkLen], first)
+		var cvs [1][8]uint32
+		fillChunkCV15(data[first*chunkLen:], cvs[:], uint64(first), key, flags)
+		last = output{
+			inputCV:  cvs[0],
+			block:    wordsFromLE(data[n-blockLen:]),
+			counter:  uint64(first),
+			blockLen: blockLen,
+			flags:    flags | flagChunkEnd,
 		}
-		lastCS := newChunkState(key, uint64(lastIdx), flags)
-		lastCS.update(data[(nChunks-1)*chunkLen:])
-		last = lastCS.output()
 	} else {
 		stack.foldChunkCVs(data[:(nChunks-1)*chunkLen], nChunks-1)
 		lastCS := newChunkState(key, uint64(nChunks-1), flags)

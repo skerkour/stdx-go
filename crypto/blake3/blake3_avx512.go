@@ -5,6 +5,7 @@ package blake3
 import (
 	"encoding/binary"
 	"simd/archsimd"
+	"unsafe"
 )
 
 // This file is the experimental, cgo-free, assembly-free SIMD acceleration of
@@ -40,10 +41,122 @@ var rotCounts = [4][16]uint32{
 	{7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7},
 }
 
-// bcast512 returns a vector with x in every lane.
+// permLo128Idx and permHi128Idx encode the two _mm512_shuffle_i32x4 stages
+// (imm 0x88 / 0xdd) of the reference 16x16 transpose as VPERMT2D
+// (ConcatPermute) index vectors over the concatenation of the two 512-bit
+// sources. permLo128Idx selects {a.128[0], a.128[2], b.128[0], b.128[2]};
+// permHi128Idx selects {a.128[1], a.128[3], b.128[1], b.128[3]}.
+var (
+	permLo128Idx = [16]uint32{
+		0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27,
+	}
+	permHi128Idx = [16]uint32{
+		4, 5, 6, 7, 12, 13, 14, 15, 20, 21, 22, 23, 28, 29, 30, 31,
+	}
+)
+
+// interleaveLo64/interleaveHi64 interleave the 64-bit lanes of x and y within
+// each 128-bit subvector (VPUNPCKLQDQ / VPUNPCKHQDQ), through a 64-bit reshape
+// so the archsimd op lowers to the right instruction.
+func interleaveLo64(x, y archsimd.Uint32x16) archsimd.Uint32x16 {
+	return x.ReshapeToUint64s().InterleaveLoGrouped(y.ReshapeToUint64s()).ReshapeToUint32s()
+}
+
+func interleaveHi64(x, y archsimd.Uint32x16) archsimd.Uint32x16 {
+	return x.ReshapeToUint64s().InterleaveHiGrouped(y.ReshapeToUint64s()).ReshapeToUint32s()
+}
+
+// transposeVecs512 performs the reference 16x16 word-matrix transpose on 16
+// 512-bit vectors (each input holds one row of 16 words), producing 16 vectors
+// where output i holds word i across all 16 inputs. It mirrors the reference
+// transpose_vecs_512: VPUNPCKLDQ/HDQ (32-bit lanes), then VPUNPCKLQDQ/HQDQ
+// (64-bit lanes), then two 128-bit interleave stages (VSHUFI32X4, expressed
+// here as VPERMT2D/ConcatPermute). Like the reference, the result carries a
+// fixed lane permutation that is its own inverse, so applying it to the chunk
+// outputs undoes the permutation applied to the messages.
+func transposeVecs512(
+	a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p archsimd.Uint32x16,
+) (r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15 archsimd.Uint32x16) {
+	lo128 := archsimd.LoadUint32x16Array(&permLo128Idx)
+	hi128 := archsimd.LoadUint32x16Array(&permHi128Idx)
+
+	// Interleave 32-bit lanes within each 128-bit subvector.
+	ab0 := a.InterleaveLoGrouped(b)
+	ab2 := a.InterleaveHiGrouped(b)
+	cd0 := c.InterleaveLoGrouped(d)
+	cd2 := c.InterleaveHiGrouped(d)
+	ef0 := e.InterleaveLoGrouped(f)
+	ef2 := e.InterleaveHiGrouped(f)
+	gh0 := g.InterleaveLoGrouped(h)
+	gh2 := g.InterleaveHiGrouped(h)
+	ij0 := i.InterleaveLoGrouped(j)
+	ij2 := i.InterleaveHiGrouped(j)
+	kl0 := k.InterleaveLoGrouped(l)
+	kl2 := k.InterleaveHiGrouped(l)
+	mn0 := m.InterleaveLoGrouped(n)
+	mn2 := m.InterleaveHiGrouped(n)
+	op0 := o.InterleaveLoGrouped(p)
+	op2 := o.InterleaveHiGrouped(p)
+
+	// Interleave 64-bit lanes within each 128-bit subvector.
+	abcd0 := interleaveLo64(ab0, cd0)
+	abcd1 := interleaveHi64(ab0, cd0)
+	abcd2 := interleaveLo64(ab2, cd2)
+	abcd3 := interleaveHi64(ab2, cd2)
+	efgh0 := interleaveLo64(ef0, gh0)
+	efgh1 := interleaveHi64(ef0, gh0)
+	efgh2 := interleaveLo64(ef2, gh2)
+	efgh3 := interleaveHi64(ef2, gh2)
+	ijkl0 := interleaveLo64(ij0, kl0)
+	ijkl1 := interleaveHi64(ij0, kl0)
+	ijkl2 := interleaveLo64(ij2, kl2)
+	ijkl3 := interleaveHi64(ij2, kl2)
+	mnop0 := interleaveLo64(mn0, op0)
+	mnop1 := interleaveHi64(mn0, op0)
+	mnop2 := interleaveLo64(mn2, op2)
+	mnop3 := interleaveHi64(mn2, op2)
+
+	// Interleave 128-bit lanes (first stage).
+	abcdefgh0 := abcd0.ConcatPermute(efgh0, lo128)
+	abcdefgh1 := abcd1.ConcatPermute(efgh1, lo128)
+	abcdefgh2 := abcd2.ConcatPermute(efgh2, lo128)
+	abcdefgh3 := abcd3.ConcatPermute(efgh3, lo128)
+	abcdefgh4 := abcd0.ConcatPermute(efgh0, hi128)
+	abcdefgh5 := abcd1.ConcatPermute(efgh1, hi128)
+	abcdefgh6 := abcd2.ConcatPermute(efgh2, hi128)
+	abcdefgh7 := abcd3.ConcatPermute(efgh3, hi128)
+	ijklmnop0 := ijkl0.ConcatPermute(mnop0, lo128)
+	ijklmnop1 := ijkl1.ConcatPermute(mnop1, lo128)
+	ijklmnop2 := ijkl2.ConcatPermute(mnop2, lo128)
+	ijklmnop3 := ijkl3.ConcatPermute(mnop3, lo128)
+	ijklmnop4 := ijkl0.ConcatPermute(mnop0, hi128)
+	ijklmnop5 := ijkl1.ConcatPermute(mnop1, hi128)
+	ijklmnop6 := ijkl2.ConcatPermute(mnop2, hi128)
+	ijklmnop7 := ijkl3.ConcatPermute(mnop3, hi128)
+
+	// Interleave 128-bit lanes (final stage).
+	r0 = abcdefgh0.ConcatPermute(ijklmnop0, lo128)
+	r1 = abcdefgh1.ConcatPermute(ijklmnop1, lo128)
+	r2 = abcdefgh2.ConcatPermute(ijklmnop2, lo128)
+	r3 = abcdefgh3.ConcatPermute(ijklmnop3, lo128)
+	r4 = abcdefgh4.ConcatPermute(ijklmnop4, lo128)
+	r5 = abcdefgh5.ConcatPermute(ijklmnop5, lo128)
+	r6 = abcdefgh6.ConcatPermute(ijklmnop6, lo128)
+	r7 = abcdefgh7.ConcatPermute(ijklmnop7, lo128)
+	r8 = abcdefgh0.ConcatPermute(ijklmnop0, hi128)
+	r9 = abcdefgh1.ConcatPermute(ijklmnop1, hi128)
+	r10 = abcdefgh2.ConcatPermute(ijklmnop2, hi128)
+	r11 = abcdefgh3.ConcatPermute(ijklmnop3, hi128)
+	r12 = abcdefgh4.ConcatPermute(ijklmnop4, hi128)
+	r13 = abcdefgh5.ConcatPermute(ijklmnop5, hi128)
+	r14 = abcdefgh6.ConcatPermute(ijklmnop6, hi128)
+	r15 = abcdefgh7.ConcatPermute(ijklmnop7, hi128)
+	return r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15
+}
+
+// bcast512 returns a vector with x in every lane (a single VPBROADCASTD).
 func bcast512(x uint32) archsimd.Uint32x16 {
-	a := [16]uint32{x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x}
-	return archsimd.LoadUint32x16(a[:])
+	return archsimd.BroadcastUint32x16(x)
 }
 
 // gVec512 is the BLAKE3 quarter round on 16 lanes at once. The rotations are
@@ -68,33 +181,96 @@ func gVec512(va, vb, vc, vd archsimd.Uint32x16, mx, my *[16]uint32, r16, r12, r8
 	return va, vb, vc, vd
 }
 
-// compressChunksAvx512 hashes the simdLanes512 full 1024-byte chunks at
-// indices base..base+simdLanes512-1 (lane j = chunk base+j) and writes their
-// chaining values into cvs. counterBase is the BLAKE3 chunk counter of data[0].
+// compressChunksAvx512 hashes the first `lanes` (1..simdLanesAvx512) full
+// 1024-byte chunks at indices base..base+lanes-1 (lane j = chunk base+j) and
+// writes their chaining values into cvs. counterBase is the BLAKE3 chunk
+// counter of data[0]. The chunk at index base+lanes-1 is hashed for its first
+// `blocks` blocks; all other chunks are hashed for all 16. endFlag marks which
+// block carries CHUNK_END: blocks-1 when set (a full chunk), none when clear
+// (computing the pre-final CV of a full chunk for its output node). The unused
+// lanes are zero-filled and their outputs discarded, so partial batches work.
 //
-// The message data for all 16 blocks of the batch is transposed into the
-// lane-major layout (t[b][i] lane j = word i of block b of chunk base+j) once,
-// before the block loop, so the hot loop does no scalar gather. Within the
-// loop the 16 state vectors plus the 4 rotation-count vectors are the only
-// long-lived vector values and the messages are read through gVec512's
-// memory-operand loads, avoiding the state spills of materializing all 16
-// message vectors as registers.
-func compressChunksAvx512(data []byte, base int, counterBase uint64, cvs [][8]uint32, key [8]uint32, flags uint32) {
-	// Transpose all 16 blocks once: t[b][i][j] = little-endian word i of the
-	// 64-byte block b of chunk base+j.
+// The message data for the hashed blocks is transposed into the lane-major
+// layout (t[b][i] lane j = word i of block b of chunk base+j) once, before the
+// block loop, so the hot loop does no scalar gather. Within the loop the 16
+// state vectors plus the 4 rotation-count vectors are the only long-lived
+// vector values and the messages are read through gVec512's memory-operand
+// loads, avoiding the state spills of materializing all 16 message vectors as
+// registers.
+func compressChunksAvx512(data []byte, base int, counterBase uint64, cvs [][8]uint32, key [8]uint32, flags uint32, lanes, blocks int, endFlag bool) {
+	// Transpose the message data once: t[b][i][j] = little-endian word i of the
+	// 64-byte block b of chunk base+j, for the first `lanes` chunks. The
+	// remaining lanes stay zero, so the compression is well-defined on them.
+	// Full batches use the vectorized 16x16 transpose; partial batches fall
+	// back to the scalar gather (they are rare and small).
 	var t [16][16][simdLanesAvx512]uint32
-	for b := 0; b < 16; b++ {
-		for j := 0; j < simdLanesAvx512; j++ {
-			blk := data[(base+j)*chunkLen+b*blockLen:]
-			for i := 0; i < 16; i++ {
-				t[b][i][j] = binary.LittleEndian.Uint32(blk[i*4:])
+	if lanes == simdLanesAvx512 && blocks == 16 {
+		for b := 0; b < blocks; b++ {
+			off := (base * chunkLen) + b*blockLen
+			va := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			vb := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			vc := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			vd := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			ve := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			vf := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			vg := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			vh := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			vi := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			vj := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			vk := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			vl := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			vm := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			vn := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			vo := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			off += chunkLen
+			vp := archsimd.LoadUint32x16Array((*[16]uint32)(unsafe.Pointer(&data[off])))
+			wa, wb, wc, wd, we, wf, wg, wh, wi, wj, wk, wl, wm, wn, wo, wp :=
+				transposeVecs512(va, vb, vc, vd, ve, vf, vg, vh, vi, vj, vk, vl, vm, vn, vo, vp)
+			wa.StoreArray(&t[b][0])
+			wb.StoreArray(&t[b][1])
+			wc.StoreArray(&t[b][2])
+			wd.StoreArray(&t[b][3])
+			we.StoreArray(&t[b][4])
+			wf.StoreArray(&t[b][5])
+			wg.StoreArray(&t[b][6])
+			wh.StoreArray(&t[b][7])
+			wi.StoreArray(&t[b][8])
+			wj.StoreArray(&t[b][9])
+			wk.StoreArray(&t[b][10])
+			wl.StoreArray(&t[b][11])
+			wm.StoreArray(&t[b][12])
+			wn.StoreArray(&t[b][13])
+			wo.StoreArray(&t[b][14])
+			wp.StoreArray(&t[b][15])
+		}
+	} else {
+		for b := 0; b < blocks; b++ {
+			for j := 0; j < lanes; j++ {
+				blk := data[(base+j)*chunkLen+b*blockLen:]
+				for i := 0; i < 16; i++ {
+					t[b][i][j] = binary.LittleEndian.Uint32(blk[i*4:])
+				}
 			}
 		}
 	}
 
 	// Per-lane chunk counters (chunk index), split into low/high 32 bits.
 	var ctrLo, ctrHi [simdLanesAvx512]uint32
-	for j := 0; j < simdLanesAvx512; j++ {
+	for j := 0; j < lanes; j++ {
 		c := counterBase + uint64(base+j)
 		ctrLo[j] = uint32(c)
 		ctrHi[j] = uint32(c >> 32)
@@ -123,21 +299,27 @@ func compressChunksAvx512(data []byte, base int, counterBase uint64, cvs [][8]ui
 	r8 := archsimd.LoadUint32x16Array(&rotCounts[2])
 	r7 := archsimd.LoadUint32x16Array(&rotCounts[3])
 
+	// The per-block flag vector takes only three distinct values (chunk start,
+	// middle blocks, chunk end), so broadcast each once and select in the loop.
+	vFlagsStart := bcast512(flags | flagChunkStart)
+	vFlagsMid := bcast512(flags)
+	vFlagsEnd := bcast512(flags | flagChunkEnd)
+
 	// A full chunk is 16 blocks of 64 bytes; block 0 carries CHUNK_START and
-	// block 15 carries CHUNK_END, mirroring chunkState.update + output().
-	for b := 0; b < 16; b++ {
-		fl := flags
+	// (for a full 16-block hash) block 15 carries CHUNK_END, mirroring
+	// chunkState.update + output().
+	for b := 0; b < blocks; b++ {
+		v15 := vFlagsMid
 		if b == 0 {
-			fl |= flagChunkStart
-		}
-		if b == 15 {
-			fl |= flagChunkEnd
+			v15 = vFlagsStart
+		} else if endFlag && b == blocks-1 {
+			v15 = vFlagsEnd
 		}
 
 		v0, v1, v2, v3 := cv0, cv1, cv2, cv3
 		v4, v5, v6, v7 := cv4, cv5, cv6, cv7
 		v8, v9, v10, v11 := iv0, iv1, iv2, iv3
-		v12, v13, v14, v15 := vCtrLo, vCtrHi, vBlockLen, bcast512(fl)
+		v12, v13, v14 := vCtrLo, vCtrHi, vBlockLen
 
 		// 7 unrolled rounds; each line is one gVec512 with the static message
 		// schedule index. The message operands are pointers into the
@@ -217,46 +399,59 @@ func compressChunksAvx512(data []byte, base int, counterBase uint64, cvs [][8]ui
 	}
 
 	// Scatter lane j of each CV word back to chunk base+j.
+	// The vectorized transpose permuted the message lanes, so undo it first
+	// (the transpose is its own inverse, matching the reference) to restore
+	// natural chunk order. The partial (scalar-transpose) path is already in
+	// natural order.
+	if lanes == simdLanesAvx512 && blocks == 16 {
+		var z archsimd.Uint32x16
+		c0, c1, c2, c3, c4, c5, c6, c7, _, _, _, _, _, _, _, _ :=
+			transposeVecs512(cv0, cv1, cv2, cv3, cv4, cv5, cv6, cv7, z, z, z, z, z, z, z, z)
+		cv0, cv1, cv2, cv3, cv4, cv5, cv6, cv7 = c0, c1, c2, c3, c4, c5, c6, c7
+	}
+
 	var lane [simdLanesAvx512]uint32
 	cv0.Store(lane[:])
-	for j := 0; j < simdLanesAvx512; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][0] = lane[j]
 	}
 	cv1.Store(lane[:])
-	for j := 0; j < simdLanesAvx512; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][1] = lane[j]
 	}
 	cv2.Store(lane[:])
-	for j := 0; j < simdLanesAvx512; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][2] = lane[j]
 	}
 	cv3.Store(lane[:])
-	for j := 0; j < simdLanesAvx512; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][3] = lane[j]
 	}
 	cv4.Store(lane[:])
-	for j := 0; j < simdLanesAvx512; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][4] = lane[j]
 	}
 	cv5.Store(lane[:])
-	for j := 0; j < simdLanesAvx512; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][5] = lane[j]
 	}
 	cv6.Store(lane[:])
-	for j := 0; j < simdLanesAvx512; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][6] = lane[j]
 	}
 	cv7.Store(lane[:])
-	for j := 0; j < simdLanesAvx512; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][7] = lane[j]
 	}
 }
 
 // compressOutputsAvx512 computes simdLanes512 64-byte root output blocks
 // starting at block start. The message block and input CV are constant across
-// lanes; only the counter varies. As with compressChunksLanes512, the message
-// and state vectors are named locals and the rounds are fully unrolled.
-func compressOutputsAvx512(out []byte, cv *[8]uint32, block *[16]uint32, blkLen, flags uint32, start uint64) {
+// lanes; only the counter varies. The message words are read through gVec512's
+// memory-operand loads from the broadcast buffer m (built once by
+// compressOutputs). As with compressChunksLanes512, the state vectors are named
+// locals and the rounds are fully unrolled.
+func compressOutputsAvx512(out []byte, cv *[8]uint32, m *[16][simdLanesAvx512]uint32, blkLen, flags uint32, start uint64) {
 	var ctrLo, ctrHi [simdLanesAvx512]uint32
 	for j := 0; j < simdLanesAvx512; j++ {
 		c := start + uint64(j)
@@ -280,15 +475,6 @@ func compressOutputsAvx512(out []byte, cv *[8]uint32, block *[16]uint32, blkLen,
 	iv1 := bcast512(iv[1])
 	iv2 := bcast512(iv[2])
 	iv3 := bcast512(iv[3])
-
-	// The message block is the same in every output block, so broadcast each
-	// word into its own 16-lane row and pass pointers to gVec512.
-	var m [16][simdLanesAvx512]uint32
-	for i := 0; i < 16; i++ {
-		for j := 0; j < simdLanesAvx512; j++ {
-			m[i][j] = block[i]
-		}
-	}
 
 	r16 := archsimd.LoadUint32x16Array(&rotCounts[0])
 	r12 := archsimd.LoadUint32x16Array(&rotCounts[1])

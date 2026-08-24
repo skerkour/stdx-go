@@ -29,7 +29,7 @@ func TestAVX2PathCrossCheck(t *testing.T) {
 
 	// Chunk kernel vs scalar.
 	var simdCV, scalarCV [simdLanes][8]uint32
-	compressChunksAvx2(data, 0, 0, simdCV[:], key, 0)
+	compressChunksAvx2(data, 0, 0, simdCV[:], key, 0, simdLanes, 16, true)
 	for i := 0; i < simdLanes; i++ {
 		scalarCV[i] = compressChunkCV(data, i, 0, key, 0)
 	}
@@ -45,8 +45,14 @@ func TestAVX2PathCrossCheck(t *testing.T) {
 	for i := range blk {
 		blk[i] = rng.Uint32()
 	}
+	var m [16][simdLanes]uint32
+	for i := range blk {
+		for j := 0; j < simdLanes; j++ {
+			m[i][j] = blk[i]
+		}
+	}
 	var simdOut, scalarOut [simdLanes * blockLen]byte
-	compressOutputsAvx2(simdOut[:], &cv, &blk, blockLen, flagRoot, 7)
+	compressOutputsAvx2(simdOut[:], &cv, &m, blockLen, flagRoot, 7)
 	compressOutputsScalar(scalarOut[:], &cv, &blk, blockLen, flagRoot, 7)
 	if !bytes.Equal(simdOut[:], scalarOut[:]) {
 		t.Fatal("compressOutputsLanes != scalar")

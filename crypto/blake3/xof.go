@@ -16,10 +16,10 @@ type XofReader struct {
 	n   output // the root output node, without the flagRoot bit
 	off uint64 // current position within the output stream, in bytes
 
-	// buf caches simdLanes output blocks ahead of the current position so
+	// buf caches xofBufLen output blocks ahead of the current position so
 	// small Read calls are served from memory instead of one compression each.
-	// bufValid is true when buf holds blocks bufStart..bufStart+simdLanes-1.
-	buf      [simdLanes * blockLen]byte
+	// bufValid is true when buf holds blocks bufStart..bufStart+len(buf)/blockLen-1.
+	buf      [xofBufLen]byte
 	bufStart uint64 // block index of buf[0]
 	bufValid bool
 }

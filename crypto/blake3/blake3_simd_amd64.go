@@ -35,7 +35,10 @@ const simdLanes = 8
 // fillChunkCVs hashes chunks per SIMD batch, synchronously on the calling
 // goroutine. All work is stack-scoped, so nothing allocates. The AVX-512
 // kernel (16 chunks/batch) is used when available, else the AVX2 kernel
-// (8 chunks/batch), else the scalar path on CPUs without AVX2.
+// (8 chunks/batch), else the scalar path on CPUs without AVX2. The final
+// partial batch (fewer chunks than the batch width) is still hashed by the SIMD
+// kernel with zero-filled spare lanes, so even small counts of whole chunks use
+// the SIMD path.
 func fillChunkCVs(data []byte, cvs [][8]uint32, base uint64, key [8]uint32, flags uint32) {
 	if !archsimd.X86.AVX2() {
 		fillChunkCVsScalar(data, cvs, base, key, flags)
@@ -45,35 +48,71 @@ func fillChunkCVs(data []byte, cvs [][8]uint32, base uint64, key [8]uint32, flag
 	batch := 0
 	if archsimd.X86.AVX512() {
 		for ; batch+simdLanesAvx512 <= n; batch += simdLanesAvx512 {
-			compressChunksAvx512(data, batch, base, cvs, key, flags)
+			compressChunksAvx512(data, batch, base, cvs, key, flags, simdLanesAvx512, 16, true)
 		}
+		if batch < n {
+			compressChunksAvx512(data, batch, base, cvs, key, flags, n-batch, 16, true)
+			return
+		}
+		return
 	}
 	for ; batch+simdLanes <= n; batch += simdLanes {
-		compressChunksAvx2(data, batch, base, cvs, key, flags)
+		compressChunksAvx2(data, batch, base, cvs, key, flags, simdLanes, 16, true)
 	}
-	for ; batch < n; batch++ {
-		cvs[batch] = compressChunkCV(data, batch, base, key, flags)
+	if batch < n {
+		compressChunksAvx2(data, batch, base, cvs, key, flags, n-batch, 16, true)
 	}
+}
+
+// fillChunkCV15 computes the chaining value of a full 1024-byte chunk after its
+// first 15 blocks — the inputCV of the chunk's final (CHUNK_END) block, which
+// is what the chunk's output node compresses. It lets hashAll build the last
+// chunk's output node without hashing that chunk twice.
+func fillChunkCV15(data []byte, cvs [][8]uint32, base uint64, key [8]uint32, flags uint32) {
+	if archsimd.X86.AVX512() {
+		compressChunksAvx512(data, 0, base, cvs, key, flags, 1, 15, false)
+		return
+	}
+	if archsimd.X86.AVX2() {
+		compressChunksAvx2(data, 0, base, cvs, key, flags, 1, 15, false)
+		return
+	}
+	cs := newChunkState(key, base, flags)
+	cs.update(data[:15*blockLen])
+	cvs[0] = cs.cv
 }
 
 // compressOutputs fills out with the extendable root output, simdLanesAvx512
 // blocks per AVX-512 batch (or simdLanes per AVX2 batch). Each output block
 // uses a distinct counter (the per-lane counter vectors) against the same
-// message block and input CV.
+// message block and input CV. The broadcast message buffer is built once per
+// call (the block is constant across all batches) and shared by the kernels.
 func compressOutputs(out []byte, cv *[8]uint32, block *[16]uint32, blkLen, flags uint32, start uint64) {
 	if !archsimd.X86.AVX2() {
 		compressOutputsScalar(out, cv, block, blkLen, flags, start)
 		return
 	}
+	var m8 [16][simdLanes]uint32
+	for i := 0; i < 16; i++ {
+		for j := 0; j < simdLanes; j++ {
+			m8[i][j] = block[i]
+		}
+	}
 	if archsimd.X86.AVX512() {
+		var m512 [16][simdLanesAvx512]uint32
+		for i := 0; i < 16; i++ {
+			for j := 0; j < simdLanesAvx512; j++ {
+				m512[i][j] = block[i]
+			}
+		}
 		for len(out) >= simdLanesAvx512*blockLen {
-			compressOutputsAvx512(out, cv, block, blkLen, flags, start)
+			compressOutputsAvx512(out, cv, &m512, blkLen, flags, start)
 			out = out[simdLanesAvx512*blockLen:]
 			start += simdLanesAvx512
 		}
 	}
 	for len(out) >= simdLanes*blockLen {
-		compressOutputsAvx2(out, cv, block, blkLen, flags, start)
+		compressOutputsAvx2(out, cv, &m8, blkLen, flags, start)
 		out = out[simdLanes*blockLen:]
 		start += simdLanes
 	}
@@ -136,29 +175,34 @@ func gVec(va, vb, vc, vd archsimd.Uint32x8, mx, my *[8]uint32) (archsimd.Uint32x
 	return va, vb, vc, vd
 }
 
-// bcast returns a vector with x in every lane.
+// bcast returns a vector with x in every lane (a single VPBROADCASTD).
 func bcast(x uint32) archsimd.Uint32x8 {
-	a := [8]uint32{x, x, x, x, x, x, x, x}
-	return archsimd.LoadUint32x8(a[:])
+	return archsimd.BroadcastUint32x8(x)
 }
 
-// compressChunksAvx2 hashes the simdLanes full 1024-byte chunks at indices
-// base..base+simdLanes-1 (lane j = chunk base+j) and writes their chaining
-// values into cvs. counterBase is the BLAKE3 chunk counter of data[0].
+// compressChunksAvx2 hashes the first `lanes` (1..simdLanes) full 1024-byte
+// chunks at indices base..base+lanes-1 (lane j = chunk base+j) and writes their
+// chaining values into cvs. counterBase is the BLAKE3 chunk counter of data[0].
+// The chunk at index base+lanes-1 is hashed for its first `blocks` blocks; all
+// other chunks are hashed for all 16. endFlag marks which block carries
+// CHUNK_END: blocks-1 when set (a full chunk), none when clear (computing the
+// pre-final CV of a full chunk for its output node). The unused lanes are
+// zero-filled and their outputs discarded, so partial batches work.
 //
-// The message data for all 16 blocks of the batch is transposed into the
-// lane-major layout (t[b][i] lane j = word i of block b of chunk base+j) once,
-// before the block loop, so the hot loop does no scalar gather. Within the
-// loop the 16 state vectors are the only live vector values (they fit the 16
-// YMM registers) and the messages are read through gVec's memory-operand
-// loads, so the register pressure Go's allocator otherwise resolves by
-// spilling state is largely avoided.
-func compressChunksAvx2(data []byte, base int, counterBase uint64, cvs [][8]uint32, key [8]uint32, flags uint32) {
-	// Transpose all 16 blocks once: t[b][i][j] = little-endian word i of the
-	// 64-byte block b of chunk base+j.
+// The message data for the hashed blocks is transposed into the lane-major
+// layout (t[b][i] lane j = word i of block b of chunk base+j) once, before the
+// block loop, so the hot loop does no scalar gather. Within the loop the 16
+// state vectors are the only live vector values (they fit the 16 YMM
+// registers) and the messages are read through gVec's memory-operand loads, so
+// the register pressure Go's allocator otherwise resolves by spilling state is
+// largely avoided.
+func compressChunksAvx2(data []byte, base int, counterBase uint64, cvs [][8]uint32, key [8]uint32, flags uint32, lanes, blocks int, endFlag bool) {
+	// Transpose the message data once: t[b][i][j] = little-endian word i of the
+	// 64-byte block b of chunk base+j, for the first `lanes` chunks. The
+	// remaining lanes stay zero, so the compression is well-defined on them.
 	var t [16][16][simdLanes]uint32
 	for b := 0; b < 16; b++ {
-		for j := 0; j < simdLanes; j++ {
+		for j := 0; j < lanes; j++ {
 			blk := data[(base+j)*chunkLen+b*blockLen:]
 			for i := 0; i < 16; i++ {
 				t[b][i][j] = binary.LittleEndian.Uint32(blk[i*4:])
@@ -168,7 +212,7 @@ func compressChunksAvx2(data []byte, base int, counterBase uint64, cvs [][8]uint
 
 	// Per-lane chunk counters (chunk index), split into low/high 32 bits.
 	var ctrLo, ctrHi [simdLanes]uint32
-	for j := 0; j < simdLanes; j++ {
+	for j := 0; j < lanes; j++ {
 		c := counterBase + uint64(base+j)
 		ctrLo[j] = uint32(c)
 		ctrHi[j] = uint32(c >> 32)
@@ -193,21 +237,27 @@ func compressChunksAvx2(data []byte, base int, counterBase uint64, cvs [][8]uint
 	iv2 := bcast(iv[2])
 	iv3 := bcast(iv[3])
 
+	// The per-block flag vector takes only three distinct values (chunk start,
+	// middle blocks, chunk end), so broadcast each once and select in the loop.
+	vFlagsStart := bcast(flags | flagChunkStart)
+	vFlagsMid := bcast(flags)
+	vFlagsEnd := bcast(flags | flagChunkEnd)
+
 	// A full chunk is 16 blocks of 64 bytes; block 0 carries CHUNK_START and
-	// block 15 carries CHUNK_END, mirroring chunkState.update + output().
-	for b := 0; b < 16; b++ {
-		fl := flags
+	// (for a full 16-block hash) block 15 carries CHUNK_END, mirroring
+	// chunkState.update + output().
+	for b := 0; b < blocks; b++ {
+		v15 := vFlagsMid
 		if b == 0 {
-			fl |= flagChunkStart
-		}
-		if b == 15 {
-			fl |= flagChunkEnd
+			v15 = vFlagsStart
+		} else if endFlag && b == blocks-1 {
+			v15 = vFlagsEnd
 		}
 
 		v0, v1, v2, v3 := cv0, cv1, cv2, cv3
 		v4, v5, v6, v7 := cv4, cv5, cv6, cv7
 		v8, v9, v10, v11 := iv0, iv1, iv2, iv3
-		v12, v13, v14, v15 := vCtrLo, vCtrHi, vBlockLen, bcast(fl)
+		v12, v13, v14 := vCtrLo, vCtrHi, vBlockLen
 
 		// 7 unrolled rounds; each line is one gVec with the static message
 		// schedule index. The message operands are pointers into the
@@ -289,45 +339,45 @@ func compressChunksAvx2(data []byte, base int, counterBase uint64, cvs [][8]uint
 	// Scatter lane j of each CV word back to chunk base+j.
 	var lane [simdLanes]uint32
 	cv0.Store(lane[:])
-	for j := 0; j < simdLanes; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][0] = lane[j]
 	}
 	cv1.Store(lane[:])
-	for j := 0; j < simdLanes; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][1] = lane[j]
 	}
 	cv2.Store(lane[:])
-	for j := 0; j < simdLanes; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][2] = lane[j]
 	}
 	cv3.Store(lane[:])
-	for j := 0; j < simdLanes; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][3] = lane[j]
 	}
 	cv4.Store(lane[:])
-	for j := 0; j < simdLanes; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][4] = lane[j]
 	}
 	cv5.Store(lane[:])
-	for j := 0; j < simdLanes; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][5] = lane[j]
 	}
 	cv6.Store(lane[:])
-	for j := 0; j < simdLanes; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][6] = lane[j]
 	}
 	cv7.Store(lane[:])
-	for j := 0; j < simdLanes; j++ {
+	for j := 0; j < lanes; j++ {
 		cvs[base+j][7] = lane[j]
 	}
 }
 
 // compressOutputsAvx2 computes simdLanes 64-byte root output blocks starting
 // at block start. The message block and input CV are constant across lanes;
-// only the counter varies. The message words are stored broadcast into a small
-// buffer and read through gVec's memory-operand loads, keeping the 16 state
-// vectors the only live vector values.
-func compressOutputsAvx2(out []byte, cv *[8]uint32, block *[16]uint32, blkLen, flags uint32, start uint64) {
+// only the counter varies. The message words are read through gVec's
+// memory-operand loads from the broadcast buffer m (built once by
+// compressOutputs), keeping the 16 state vectors the only live vector values.
+func compressOutputsAvx2(out []byte, cv *[8]uint32, m *[16][simdLanes]uint32, blkLen, flags uint32, start uint64) {
 	var ctrLo, ctrHi [simdLanes]uint32
 	for j := 0; j < simdLanes; j++ {
 		c := start + uint64(j)
@@ -351,15 +401,6 @@ func compressOutputsAvx2(out []byte, cv *[8]uint32, block *[16]uint32, blkLen, f
 	iv1 := bcast(iv[1])
 	iv2 := bcast(iv[2])
 	iv3 := bcast(iv[3])
-
-	// The message block is the same in every output block, so broadcast each
-	// word into its own 8-lane row and pass pointers to gVec.
-	var m [16][8]uint32
-	for i := 0; i < 16; i++ {
-		for j := 0; j < 8; j++ {
-			m[i][j] = block[i]
-		}
-	}
 
 	v0, v1, v2, v3 := cv0, cv1, cv2, cv3
 	v4, v5, v6, v7 := cv4, cv5, cv6, cv7

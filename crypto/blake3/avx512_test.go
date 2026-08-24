@@ -179,7 +179,7 @@ func TestAVX512PathCrossCheck(t *testing.T) {
 
 	// Chunk kernel vs scalar.
 	var simdCV, scalarCV [simdLanesAvx512][8]uint32
-	compressChunksAvx512(data, 0, 0, simdCV[:], key, 0)
+	compressChunksAvx512(data, 0, 0, simdCV[:], key, 0, simdLanesAvx512, 16, true)
 	for i := 0; i < simdLanesAvx512; i++ {
 		scalarCV[i] = compressChunkCV(data, i, 0, key, 0)
 	}
@@ -193,7 +193,7 @@ func TestAVX512PathCrossCheck(t *testing.T) {
 	for i := 0; i < simdLanesAvx512; i++ {
 		scalarCV[i] = compressChunkCV(data, i, 3, key, flagKeyedHash)
 	}
-	compressChunksAvx512(data, 0, 3, simdCV[:], key, flagKeyedHash)
+	compressChunksAvx512(data, 0, 3, simdCV[:], key, flagKeyedHash, simdLanesAvx512, 16, true)
 	for i := 0; i < simdLanesAvx512; i++ {
 		if simdCV[i] != scalarCV[i] {
 			t.Fatalf("keyed chunk %d: SIMD %x scalar %x", i, simdCV[i], scalarCV[i])
@@ -206,8 +206,14 @@ func TestAVX512PathCrossCheck(t *testing.T) {
 	for i := range blk {
 		blk[i] = rng.Uint32()
 	}
+	var m [16][simdLanesAvx512]uint32
+	for i := range blk {
+		for j := 0; j < simdLanesAvx512; j++ {
+			m[i][j] = blk[i]
+		}
+	}
 	var simdOut, scalarOut [simdLanesAvx512 * blockLen]byte
-	compressOutputsAvx512(simdOut[:], &cv, &blk, blockLen, flagRoot, 7)
+	compressOutputsAvx512(simdOut[:], &cv, &m, blockLen, flagRoot, 7)
 	compressOutputsScalar(scalarOut[:], &cv, &blk, blockLen, flagRoot, 7)
 	if !bytes.Equal(simdOut[:], scalarOut[:]) {
 		t.Fatal("compressOutputsAvx512 != scalar")
@@ -219,6 +225,44 @@ func TestAVX512PathCrossCheck(t *testing.T) {
 		compressOutputs(avx2Out[:], &cv, &blk, blockLen, flagRoot, 7)
 		if !bytes.Equal(simdOut[:], avx2Out[:]) {
 			t.Fatal("AVX-512 XOF != AVX2 XOF")
+		}
+	}
+}
+
+// TestTransposeVecs512 verifies that the vectorized 16x16 message transpose is
+// an involution: applying it twice must reproduce the input exactly. The
+// transpose carries a fixed lane permutation (like the reference), which is
+// undone on the output side, so the involution property is what makes the
+// per-chunk lanes come out in natural order. Combined with the end-to-end
+// cross-check in TestAVX512PathCrossCheck this pins the transpose's
+// correctness.
+func TestTransposeVecs512(t *testing.T) {
+	if !archsimd.X86.AVX512() {
+		t.Skip("host/emulated CPU lacks AVX-512")
+	}
+	rng := rand.New(rand.NewSource(7))
+	var in [16][16]uint32
+	for i := range in {
+		for j := range in[i] {
+			in[i][j] = rng.Uint32()
+		}
+	}
+	var v [16]archsimd.Uint32x16
+	for i := 0; i < 16; i++ {
+		v[i] = archsimd.LoadUint32x16(in[i][:])
+	}
+	a, b, c, d, e, f, g, h, i2, j2, k2, l2, m2, n2, o2, p2 :=
+		transposeVecs512(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15])
+	r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15 :=
+		transposeVecs512(a, b, c, d, e, f, g, h, i2, j2, k2, l2, m2, n2, o2, p2)
+	outs := []*archsimd.Uint32x16{&r0, &r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15}
+	var back [16][16]uint32
+	for i := 0; i < 16; i++ {
+		outs[i].Store(back[i][:])
+	}
+	for i := 0; i < 16; i++ {
+		if back[i] != in[i] {
+			t.Fatalf("transpose not an involution at row %d", i)
 		}
 	}
 }
