@@ -410,7 +410,7 @@ func BenchmarkAll(b *testing.B) {
 
 	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		s := &S1{}
 		_ = NewDecoder().Decode(s, v)
 	}

@@ -48,7 +48,7 @@ package httpx
 // 		b.ReportAllocs()
 // 		b.SetBytes(int64(len(hash)))
 // 		b.ResetTimer()
-// 		for i := 0; i < b.N; i++ {
+// 		for b.Loop() {
 // 			strconv.Quote(base64.RawURLEncoding.EncodeToString(hash[:]))
 // 		}
 // 	})
@@ -57,7 +57,7 @@ package httpx
 // 		b.ReportAllocs()
 // 		b.SetBytes(int64(len(hash)))
 // 		b.ResetTimer()
-// 		for i := 0; i < b.N; i++ {
+// 		for b.Loop() {
 // 			encodeEtagOptimized(hash)
 // 		}
 // 	})
@@ -66,7 +66,7 @@ package httpx
 // 	// 	b.ReportAllocs()
 // 	// 	b.SetBytes(int64(len(hash)))
 // 	// 	b.ResetTimer()
-// 	// 	for i := 0; i < b.N; i++ {
+// 	// 	for b.Loop() {
 // 	// 		toEtagPlus(hash)
 // 	// 	}
 // 	// })

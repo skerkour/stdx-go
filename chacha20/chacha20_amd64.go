@@ -1,7 +1,6 @@
 package chacha20
 
 import (
-	"crypto/subtle"
 	"simd/archsimd"
 	"unsafe"
 )
@@ -35,6 +34,17 @@ var (
 	// counterIncrement advances all four column counters (word 12, element 0 of
 	// each 128-bit lane) by one batch of 8 blocks.
 	counterIncrement = [8]uint32{8, 0, 0, 0, 8, 0, 0, 0}
+
+	// djbCntMask zeroes the nonce positions (elements 2,3,6,7) of a counter
+	// vector before ORing in the nonce words.
+	djbCntMask = [8]uint32{0xffffffff, 0xffffffff, 0, 0, 0xffffffff, 0xffffffff, 0, 0}
+	// djbPermLo/djbPermHi are the VPERMD indices that pull the lo/hi counter
+	// words of blocks {2k,2k+1} into elements 0/1 and 4/5 of each column
+	// vector (from the reshaped [lo,hi,lo,hi,...] of 4 consecutive counters).
+	djbPermLo = [8]uint32{0, 1, 0, 0, 2, 3, 0, 0}
+	djbPermHi = [8]uint32{4, 5, 0, 0, 6, 7, 0, 0}
+	// djbSeq4 offsets the four 64-bit counter lanes within a batch of 8.
+	djbSeq4 = [4]uint64{0, 1, 2, 3}
 )
 
 // xorKeyStream is the amd64 SIMD backend hook. It XORs src with the key
@@ -43,7 +53,7 @@ var (
 // The 512-bit AVX-512 path is used when the CPU supports it, then the 256-bit
 // AVX2 path when the CPU supports AVX2; otherwise the portable scalar backend
 // runs.
-func (cipher *CipherIetf) xorKeyStream(dst, src []byte) {
+func (cipher *Cipher) xorKeyStream(dst, src []byte) {
 	switch {
 	case archsimd.X86.AVX512() && len(src) > 256:
 		cipher.xorKeyStreamAVX512(dst, src)
@@ -55,9 +65,7 @@ func (cipher *CipherIetf) xorKeyStream(dst, src []byte) {
 }
 
 // xorKeyStreamAVX2 is the 8-block SIMD core. It XORs src with the key stream
-// generated from state (words 0-11 and 13-15 fixed, word 12 is the block
-// counter, advanced as blocks are produced) and maintains leftover key stream
-// state.
+// generated from state and maintains leftover key stream state.
 //
 // It processes 8 blocks (512 bytes) per iteration using the column-major
 // layout of chachaAVX2_amd64.s: each column k holds the 16 words of two
@@ -67,7 +75,12 @@ func (cipher *CipherIetf) xorKeyStream(dst, src []byte) {
 // shuffles and the output transpose is fused into the load/xor/store. If the
 // input is not a multiple of 512 bytes, the final iteration produces the tail
 // and any unused key stream of the last partial block is retained.
-func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
+//
+// For the IETF layout the block counters live in word 12 and the c0w3..c3w3
+// column vectors are advanced with a single vector add per iteration. For the
+// DJB layout the 64-bit counter spans words 12-13, so a scalar counter is kept
+// and the four column vectors are rebuilt from it each iteration.
+func (cipher *Cipher) xorKeyStreamAVX2(dst, src []byte) {
 	// initial state in column-major layout. s01/s23 are the two halves of the
 	// 64-byte state; each column duplicates one 4-word group across its two
 	// 128-bit lanes.
@@ -83,14 +96,6 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 	c0w0 := s01.ConcatPermute128Scalars(0, 0, s01)
 	c0w1 := s01.ConcatPermute128Scalars(1, 1, s01)
 	c0w2 := s23.ConcatPermute128Scalars(0, 0, s23)
-	c0w3 := s23.ConcatPermute128Scalars(1, 1, s23).Add(archsimd.LoadUint32x8Array(&counterOffsets[0]))
-
-	c1w0, c1w1, c1w2 := c0w0, c0w1, c0w2
-	c1w3 := c0w3.Add(archsimd.LoadUint32x8Array(&counterOffsets[1]))
-	c2w0, c2w1, c2w2 := c0w0, c0w1, c0w2
-	c2w3 := c0w3.Add(archsimd.LoadUint32x8Array(&counterOffsets[2]))
-	c3w0, c3w1, c3w2 := c0w0, c0w1, c0w2
-	c3w3 := c0w3.Add(archsimd.LoadUint32x8Array(&counterOffsets[3]))
 
 	// VPSHUFB rotation masks and the per-iteration counter increment, all
 	// loop-invariant.
@@ -98,8 +103,49 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 	rotl8 := archsimd.LoadInt8x32Array(&rotl8Idx)
 	counterInc := archsimd.LoadUint32x8Array(&counterIncrement)
 
+	// The words-12-15 column vectors. For the IETF layout they are derived once
+	// from s23 and advanced by a vector add per iteration; for the DJB layout
+	// they are rebuilt from a scalar 64-bit counter each iteration.
+	var (
+		c0w3, c1w3, c2w3, c3w3 archsimd.Uint32x8
+		c1w0, c1w1, c1w2       archsimd.Uint32x8
+		c2w0, c2w1, c2w2       archsimd.Uint32x8
+		c3w0, c3w1, c3w2       archsimd.Uint32x8
+		djbCounter             uint64
+		seq4v                  archsimd.Uint64x4
+		one4v                  archsimd.Uint64x4
+		nzVec                  archsimd.Uint32x8
+		cntMask                archsimd.Uint32x8
+		permLo                 archsimd.Uint32x8
+		permHi                 archsimd.Uint32x8
+	)
+	if cipher.djb {
+		djbCounter = cipher.counter()
+		seq4v = archsimd.LoadUint64x4Array(&djbSeq4)
+		one4v = archsimd.BroadcastUint64x4(4)
+		nzVec = archsimd.LoadUint32x8Array(&[8]uint32{0, 0, cipher.state[14], cipher.state[15], 0, 0, cipher.state[14], cipher.state[15]})
+		cntMask = archsimd.LoadUint32x8Array(&djbCntMask)
+		permLo = archsimd.LoadUint32x8Array(&djbPermLo)
+		permHi = archsimd.LoadUint32x8Array(&djbPermHi)
+		c0w3, c1w3, c2w3, c3w3 = djbCounterColumnsAVX2Simd(djbCounter, seq4v, one4v, nzVec, cntMask, permLo, permHi)
+		c1w0, c1w1, c1w2 = c0w0, c0w1, c0w2
+		c2w0, c2w1, c2w2 = c0w0, c0w1, c0w2
+		c3w0, c3w1, c3w2 = c0w0, c0w1, c0w2
+	} else {
+		c0w3 = s23.ConcatPermute128Scalars(1, 1, s23).Add(archsimd.LoadUint32x8Array(&counterOffsets[0]))
+		c1w0, c1w1, c1w2 = c0w0, c0w1, c0w2
+		c1w3 = c0w3.Add(archsimd.LoadUint32x8Array(&counterOffsets[1]))
+		c2w0, c2w1, c2w2 = c0w0, c0w1, c0w2
+		c2w3 = c0w3.Add(archsimd.LoadUint32x8Array(&counterOffsets[2]))
+		c3w0, c3w1, c3w2 = c0w0, c0w1, c0w2
+		c3w3 = c0w3.Add(archsimd.LoadUint32x8Array(&counterOffsets[3]))
+	}
+
 	// len(dst) >= 512 is not needed but it removes bound checks
 	for len(src) >= 512 && len(dst) >= 512 {
+		if cipher.djb {
+			c0w3, c1w3, c2w3, c3w3 = djbCounterColumnsAVX2Simd(djbCounter, seq4v, one4v, nzVec, cntMask, permLo, permHi)
+		}
 		o0w0, o0w1, o0w2, o0w3, o1w0, o1w1, o1w2, o1w3, o2w0, o2w1, o2w2, o2w3, o3w0, o3w1, o3w2, o3w3 :=
 			chacha8ColumnsAVX2(c0w0, c0w1, c0w2, c0w3, c1w0, c1w1, c1w2, c1w3, c2w0, c2w1, c2w2, c2w3, c3w0, c3w1, c3w2, c3w3, rotl16, rotl8)
 
@@ -114,18 +160,27 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 
 		src = src[512:]
 		dst = dst[512:]
-		c0w3 = c0w3.Add(counterInc)
-		c1w3 = c1w3.Add(counterInc)
-		c2w3 = c2w3.Add(counterInc)
-		c3w3 = c3w3.Add(counterInc)
+		if cipher.djb {
+			djbCounter += 8
+		} else {
+			c0w3 = c0w3.Add(counterInc)
+			c1w3 = c1w3.Add(counterInc)
+			c2w3 = c2w3.Add(counterInc)
+			c3w3 = c3w3.Add(counterInc)
+		}
 	}
 
-	cipher.state[12] = c0w3.GetLo().GetElem(0)
+	if !cipher.djb {
+		cipher.state[12] = c0w3.GetLo().GetElem(0)
+	}
 
 	// Tail: < 512 bytes. Generate 8 blocks of key stream into a local
 	// buffer, XOR the consumed part, and keep the unused bytes of the last
 	// partial block as leftover (<= 63).
 	if len(src) > 0 {
+		if cipher.djb {
+			c0w3, c1w3, c2w3, c3w3 = djbCounterColumnsAVX2Simd(djbCounter, seq4v, one4v, nzVec, cntMask, permLo, permHi)
+		}
 		var keystream [512]byte
 		o0w0, o0w1, o0w2, o0w3, o1w0, o1w1, o1w2, o1w3, o2w0, o2w1, o2w2, o2w3, o3w0, o3w1, o3w2, o3w3 :=
 			chacha8ColumnsAVX2(c0w0, c0w1, c0w2, c0w3, c1w0, c1w1, c1w2, c1w3, c2w0, c2w1, c2w2, c2w3, c3w0, c3w1, c3w2, c3w3, rotl16, rotl8)
@@ -136,23 +191,33 @@ func (cipher *CipherIetf) xorKeyStreamAVX2(dst, src []byte) {
 		storeCol(ks, 256, o2w0, o2w1, o2w2, o2w3)
 		storeCol(ks, 384, o3w0, o3w1, o3w2, o3w3)
 
-		// min() removes bound checks
-		n := min(len(src), 512)
-		subtle.XORBytes(dst, src, keystream[:n])
-		cipher.state[12] += uint32(n / 64)
-
-		if n%64 != 0 {
-			// n%64 != 0 here, so 64-n%64 is already ≤ 63; min makes that
-			// visible for bounds-check elision on cipher.leftover[:]
-			leftoverLen := min(64-n%64, 63)
-			copy(cipher.leftover[:leftoverLen], keystream[n:])
-			cipher.state[12] += 1
-			cipher.leftoverLen = uint8(leftoverLen)
-			return
-		}
+		cipher.processTail(dst, src, keystream[:], djbCounter)
+		return
 	}
 
+	if cipher.djb {
+		cipher.state[12] = uint32(djbCounter)
+		cipher.state[13] = uint32(djbCounter >> 32)
+	}
 	cipher.leftoverLen = 0
+}
+
+// djbCounterColumnsAVX2Simd builds the four column-major words-12-15 vectors
+// (c0w3..c3w3) for blocks c..c+7 in the DJB layout using only AVX2 ops. The
+// eight 64-bit counters are computed in SIMD as two Uint64x4 vectors and
+// reshaped to [lo,hi,lo,hi,...]; each column then selects its two lo/hi word
+// pairs with a VPERMD (Permute), zeroes the nonce positions, and ORs in the
+// nonce words.
+func djbCounterColumnsAVX2Simd(c uint64, seq4v, one4v archsimd.Uint64x4, nzVec, cntMask, permLo, permHi archsimd.Uint32x8) (c0w3, c1w3, c2w3, c3w3 archsimd.Uint32x8) {
+	v0 := archsimd.BroadcastUint64x4(c).Add(seq4v) // [c, c+1, c+2, c+3]
+	v1 := v0.Add(one4v)                            // [c+4, c+5, c+6, c+7]
+	r0 := v0.ReshapeToUint32s()                    // [lo0,hi0,lo1,hi1, lo2,hi2,lo3,hi3]
+	r1 := v1.ReshapeToUint32s()                    // [lo4,hi4,lo5,hi5, lo6,hi6,lo7,hi7]
+	c0w3 = r0.Permute(permLo).And(cntMask).Or(nzVec)
+	c1w3 = r0.Permute(permHi).And(cntMask).Or(nzVec)
+	c2w3 = r1.Permute(permLo).And(cntMask).Or(nzVec)
+	c3w3 = r1.Permute(permHi).And(cntMask).Or(nzVec)
+	return
 }
 
 // chacha8ColumnsAVX2 computes 8 blocks of ChaCha20 key stream (20 rounds +

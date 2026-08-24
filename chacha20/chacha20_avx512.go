@@ -3,7 +3,6 @@
 package chacha20
 
 import (
-	"crypto/subtle"
 	"simd/archsimd"
 	"unsafe"
 )
@@ -23,6 +22,9 @@ var (
 		{7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7},
 	}
 
+	// seq16 is the per-lane offset of the block counters within a batch of 16.
+	seq16 = [16]uint32{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+
 	// permuteABLanes02/13 gather the even/odd 128-bit lanes of the two sources,
 	// and permuteHalvesLo/Hi select the lower/upper 256-bit halves of the two
 	// sources. Indices 0-15 select the first source, 16-31 the second.
@@ -38,11 +40,13 @@ var (
 // It processes 16 blocks per iteration. If the input is not a multiple of
 // 1024 bytes, the final iteration produces the tail and any unused key stream
 // of the last partial block is retained.
-func (cipher *CipherIetf) xorKeyStreamAVX512(dst, src []byte) {
+func (cipher *Cipher) xorKeyStreamAVX512(dst, src []byte) {
 	// counter is kept as a 16-lane SIMD vector [c..c+15] and advanced in SIMD
-	// per iteration, mirroring the AVX2 backend.
+	// per iteration, mirroring the AVX2 backend. For the DJB layout the
+	// 64-bit counter spans words 12-13, so a scalar counter is kept and both
+	// vectors are rebuilt from it each iteration.
 	counterIncrement := archsimd.BroadcastUint32x16(16)
-	counter := archsimd.BroadcastUint32x16(cipher.state[12]).Add(archsimd.LoadUint32x16Array(&[16]uint32{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}))
+	counter := archsimd.BroadcastUint32x16(cipher.state[12]).Add(archsimd.LoadUint32x16Array(&seq16))
 
 	// initial state
 	i0 := archsimd.BroadcastUint32x16(cipher.state[0])
@@ -61,8 +65,16 @@ func (cipher *CipherIetf) xorKeyStreamAVX512(dst, src []byte) {
 	i14 := archsimd.BroadcastUint32x16(cipher.state[14])
 	i15 := archsimd.BroadcastUint32x16(cipher.state[15])
 
+	var djbCounter uint64
+	if cipher.djb {
+		djbCounter = cipher.counter()
+	}
+
 	// len(dst) >= 1024 is not needed but it removes bound checks
 	for len(src) >= 1024 && len(dst) >= 1024 {
+		if cipher.djb {
+			counter, i13 = djbCounterVectors512(djbCounter)
+		}
 		// 16 block-major vectors, block b in w[b]
 		w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
 			chacha16BlocksAVX512(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, counter, i13, i14, i15)
@@ -88,15 +100,24 @@ func (cipher *CipherIetf) xorKeyStreamAVX512(dst, src []byte) {
 
 		src = src[1024:]
 		dst = dst[1024:]
-		counter = counter.Add(counterIncrement)
+		if cipher.djb {
+			djbCounter += 16
+		} else {
+			counter = counter.Add(counterIncrement)
+		}
 	}
 
-	cipher.state[12] = counter.GetLo().GetLo().GetElem(0)
+	if !cipher.djb {
+		cipher.state[12] = counter.GetLo().GetLo().GetElem(0)
+	}
 
 	// Tail: < 1024 bytes. Generate 16 blocks of key stream into a local
 	// buffer, XOR the consumed part, and keep the unused bytes of the last
 	// partial block as leftover (<= 63).
 	if len(src) > 0 {
+		if cipher.djb {
+			counter, i13 = djbCounterVectors512(djbCounter)
+		}
 		var keystream [1024]byte
 		w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
 			chacha16BlocksAVX512(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, counter, i13, i14, i15)
@@ -119,23 +140,31 @@ func (cipher *CipherIetf) xorKeyStreamAVX512(dst, src []byte) {
 		storeBlock512(ks, 896, w14)
 		storeBlock512(ks, 960, w15)
 
-		// min() removes bound checks
-		n := min(len(src), 1024)
-		subtle.XORBytes(dst, src, keystream[:n])
-		cipher.state[12] += uint32(n / 64)
-
-		if n%64 != 0 {
-			// n%64 != 0 here, so 64-n%64 is already ≤ 63; min makes that
-			// visible for bounds-check elision on cipher.leftover[:]
-			leftoverLen := min(64-n%64, 63)
-			copy(cipher.leftover[:leftoverLen], keystream[n:])
-			cipher.state[12] += 1
-			cipher.leftoverLen = uint8(leftoverLen)
-			return
-		}
+		cipher.processTail(dst, src, keystream[:], djbCounter)
+		return
 	}
 
+	if cipher.djb {
+		cipher.state[12] = uint32(djbCounter)
+		cipher.state[13] = uint32(djbCounter >> 32)
+	}
 	cipher.leftoverLen = 0
+}
+
+// djbCounterVectors512 builds the word-12 (counter low) and word-13 (counter
+// high) vectors for blocks c..c+15 in the DJB layout. The low words are
+// affine in the lane index (broadcast + add); the high words are the broadcast
+// high word plus 1 on the lanes whose low word wrapped past 2^32, detected
+// with the unsigned VPCMPUD compare.
+func djbCounterVectors512(c uint64) (loV, hiV archsimd.Uint32x16) {
+	loBase := archsimd.BroadcastUint32x16(uint32(c))
+	loV = loBase.Add(archsimd.LoadUint32x16Array(&seq16))
+	hiV = archsimd.BroadcastUint32x16(uint32(c >> 32))
+	// lanes where lo(c)+i wrapped: loBase > loV (unsigned). Mask32x16
+	// ToInt32x16 sets all bits where set, so And with 1 yields the carry.
+	carry := loBase.Greater(loV).ToInt32x16().AsUint32x16().And(archsimd.BroadcastUint32x16(1))
+	hiV = hiV.Add(carry)
+	return
 }
 
 // chacha16BlocksAVX512 computes 16 blocks of ChaCha20 key stream (20 rounds +

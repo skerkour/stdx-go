@@ -126,14 +126,14 @@ func BenchmarkEncode(b *testing.B) {
 	rand.Read(src)
 
 	b.Run("asm", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			StdEncoding.Encode(dst, src)
 		}
 		b.SetBytes(int64(len(src)))
 	})
 
 	b.Run("go", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			base64.StdEncoding.Encode(dst, src)
 		}
 		b.SetBytes(int64(len(src)))
@@ -149,14 +149,14 @@ func BenchmarkDecode(b *testing.B) {
 	base64.StdEncoding.Encode(src, raw)
 
 	b.Run("asm", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			StdEncoding.Decode(dst, src)
 		}
 		b.SetBytes(int64(len(src)))
 	})
 
 	b.Run("go", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			base64.StdEncoding.Decode(dst, src)
 		}
 		b.SetBytes(int64(len(src)))

@@ -257,27 +257,27 @@ func BenchmarkFlags(b *testing.B) {
 	var a bool
 	var cpu = CPU
 	b.Run("ids", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			a = cpu.Supports(CMOV, CMPXCHG8, X87, FXSR, MMX, SYSCALL, SSE, SSE2, CX16, LAHF, POPCNT, SSE3, SSE4, SSE42, SSSE3, AVX, AVX2, BMI1, BMI2, F16C, FMA3, LZCNT, MOVBE, OSXSAVE) || a
 		}
 		_ = a
 	})
 	b.Run("features", func(b *testing.B) {
 		f := CombineFeatures(CMOV, CMPXCHG8, X87, FXSR, MMX, SYSCALL, SSE, SSE2, CX16, LAHF, POPCNT, SSE3, SSE4, SSE42, SSSE3, AVX, AVX2, BMI1, BMI2, F16C, FMA3, LZCNT, MOVBE, OSXSAVE)
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			a = cpu.HasAll(f) || a
 		}
 		_ = a
 	})
 	b.Run("id", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			a = cpu.Has(CMOV) || a
 		}
 		_ = a
 	})
 	b.Run("feature", func(b *testing.B) {
 		f := CombineFeatures(CMOV)
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			a = cpu.HasAll(f) || a
 		}
 		_ = a

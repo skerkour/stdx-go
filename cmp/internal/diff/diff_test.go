@@ -298,7 +298,7 @@ func BenchmarkDifference(b *testing.B) {
 			x, y := generateStrings(n, 0.05, 0.05, 0.10, 0)
 			b.ReportAllocs()
 			b.SetBytes(int64(len(x) + len(y)))
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				Difference(len(x), len(y), func(ix, iy int) Result {
 					return compareByte(x[ix], y[iy])
 				})

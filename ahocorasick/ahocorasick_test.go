@@ -332,19 +332,19 @@ var dictionary = []string{"Mozilla", "Mac", "Macintosh", "Safari", "Sausage"}
 var precomputed = NewStringMatcher(dictionary)
 
 func BenchmarkMatchWorks(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		precomputed.Match(bytes)
 	}
 }
 
 func BenchmarkMatchThreadSafeWorks(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		precomputed.MatchThreadSafe(bytes)
 	}
 }
 
 func BenchmarkContainsWorks(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		hits := make([]int, 0)
 		for i, s := range dictionary {
 			if strings.Contains(sbytes, s) {
@@ -357,7 +357,7 @@ func BenchmarkContainsWorks(b *testing.B) {
 var re = regexp.MustCompile("(" + strings.Join(dictionary, "|") + ")")
 
 func BenchmarkRegexpWorks(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		re.FindAllIndex(bytes, -1)
 	}
 }
@@ -366,13 +366,13 @@ var dictionary2 = []string{"Googlebot", "bingbot", "msnbot", "Yandex", "Baiduspi
 var precomputed2 = NewStringMatcher(dictionary2)
 
 func BenchmarkMatchFails(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		precomputed2.Match(bytes)
 	}
 }
 
 func BenchmarkContainsFails(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		hits := make([]int, 0)
 		for i, s := range dictionary2 {
 			if strings.Contains(sbytes, s) {
@@ -385,7 +385,7 @@ func BenchmarkContainsFails(b *testing.B) {
 var re2 = regexp.MustCompile("(" + strings.Join(dictionary2, "|") + ")")
 
 func BenchmarkRegexpFails(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		re2.FindAllIndex(bytes, -1)
 	}
 }
@@ -397,18 +397,18 @@ var dictionary3 = []string{"Mozilla", "Mac", "Macintosh", "Safari", "Phoenix"}
 var precomputed3 = NewStringMatcher(dictionary3)
 
 func BenchmarkLongMatchWorks(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		precomputed3.Match(bytes2)
 	}
 }
 func BenchmarkLongMatchThreadSafeWorks(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		precomputed3.MatchThreadSafe(bytes2)
 	}
 }
 
 func BenchmarkLongContainsWorks(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		hits := make([]int, 0)
 		for i, s := range dictionary3 {
 			if strings.Contains(sbytes2, s) {
@@ -421,7 +421,7 @@ func BenchmarkLongContainsWorks(b *testing.B) {
 var re3 = regexp.MustCompile("(" + strings.Join(dictionary3, "|") + ")")
 
 func BenchmarkLongRegexpWorks(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		re3.FindAllIndex(bytes2, -1)
 	}
 }
@@ -430,13 +430,13 @@ var dictionary4 = []string{"12343453", "34353", "234234523", "324234", "33333"}
 var precomputed4 = NewStringMatcher(dictionary4)
 
 func BenchmarkLongMatchFails(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		precomputed4.Match(bytes2)
 	}
 }
 
 func BenchmarkLongContainsFails(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		hits := make([]int, 0)
 		for i, s := range dictionary4 {
 			if strings.Contains(sbytes2, s) {
@@ -449,7 +449,7 @@ func BenchmarkLongContainsFails(b *testing.B) {
 var re4 = regexp.MustCompile("(" + strings.Join(dictionary4, "|") + ")")
 
 func BenchmarkLongRegexpFails(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		re4.FindAllIndex(bytes2, -1)
 	}
 }
@@ -458,19 +458,19 @@ var dictionary5 = []string{"12343453", "34353", "234234523", "324234", "33333", 
 var precomputed5 = NewStringMatcher(dictionary5)
 
 func BenchmarkMatchMany(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		precomputed5.Match(bytes)
 	}
 }
 
 func BenchmarkMatchThreadSafeMany(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		precomputed5.MatchThreadSafe(bytes)
 	}
 }
 
 func BenchmarkContainsMany(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		hits := make([]int, 0)
 		for i, s := range dictionary4 {
 			if strings.Contains(sbytes, s) {
@@ -483,25 +483,25 @@ func BenchmarkContainsMany(b *testing.B) {
 var re5 = regexp.MustCompile("(" + strings.Join(dictionary5, "|") + ")")
 
 func BenchmarkRegexpMany(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		re5.FindAllIndex(bytes, -1)
 	}
 }
 
 func BenchmarkLongMatchMany(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		precomputed5.Match(bytes2)
 	}
 }
 
 func BenchmarkLongMatchThreadSafeMany(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		precomputed5.MatchThreadSafe(bytes2)
 	}
 }
 
 func BenchmarkLongContainsMany(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		hits := make([]int, 0)
 		for i, s := range dictionary4 {
 			if strings.Contains(sbytes2, s) {
@@ -512,7 +512,7 @@ func BenchmarkLongContainsMany(b *testing.B) {
 }
 
 func BenchmarkLongRegexpMany(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		re5.FindAllIndex(bytes2, -1)
 	}
 }
@@ -521,13 +521,13 @@ var dictionary6 = []string{"2004", "2013", "9", "a", "an", "and", "anticipated",
 var precomputed6 = NewStringMatcher(dictionary6)
 
 func BenchmarkLargeMatchWorks(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		precomputed6.Match(bytes2)
 	}
 }
 
 func BenchmarkLargeMatchThreadSafeWorks(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		precomputed6.MatchThreadSafe(bytes2)
 	}
 }

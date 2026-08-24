@@ -43,7 +43,7 @@ func TestXORKeyStream(t *testing.T) {
 			ref.XORKeyStream(refDst, src)
 
 			cipher := NewIetf(key, nonce)
-			cipher.SetCounter(counter)
+			cipher.SetCounter(uint64(counter))
 			dst := make([]byte, size)
 			cipher.XORKeyStream(dst, src)
 
@@ -75,7 +75,7 @@ func TestXORKeyStreamHighCounter(t *testing.T) {
 		ref.XORKeyStream(refDst, src)
 
 		cipher := NewIetf(key, nonce)
-		cipher.SetCounter(counter)
+		cipher.SetCounter(uint64(counter))
 		dst := make([]byte, 64)
 		cipher.XORKeyStream(dst, src)
 

@@ -703,7 +703,7 @@ func checkIpv6(t *testing.T, reader *Reader) {
 func BenchmarkOpen(b *testing.B) {
 	var db *Reader
 	var err error
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		db, err = Open("GeoLite2-City.mmdb")
 		if err != nil {
 			b.Error(err)
@@ -722,7 +722,7 @@ func BenchmarkInterfaceLookup(b *testing.B) {
 	var result any
 
 	ip := make(net.IP, 4)
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		randomIPv4Address(r, ip)
 		err = db.Lookup(ip, &result)
 		if err != nil {
@@ -740,7 +740,7 @@ func BenchmarkInterfaceLookupNetwork(b *testing.B) {
 	var result any
 
 	ip := make(net.IP, 4)
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		randomIPv4Address(r, ip)
 		_, _, err = db.LookupNetwork(ip, &result)
 		if err != nil {
@@ -808,7 +808,7 @@ func BenchmarkCityLookup(b *testing.B) {
 	var result fullCity
 
 	ip := make(net.IP, 4)
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		randomIPv4Address(r, ip)
 		err = db.Lookup(ip, &result)
 		if err != nil {
@@ -826,7 +826,7 @@ func BenchmarkCityLookupNetwork(b *testing.B) {
 	var result fullCity
 
 	ip := make(net.IP, 4)
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		randomIPv4Address(r, ip)
 		_, _, err = db.LookupNetwork(ip, &result)
 		if err != nil {
@@ -850,7 +850,7 @@ func BenchmarkCountryCode(b *testing.B) {
 	var result MinCountry
 
 	ip := make(net.IP, 4)
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		randomIPv4Address(r, ip)
 		err = db.Lookup(ip, &result)
 		if err != nil {

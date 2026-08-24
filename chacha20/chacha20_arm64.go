@@ -1,7 +1,6 @@
 package chacha20
 
 import (
-	"crypto/subtle"
 	"simd/archsimd"
 	"unsafe"
 )
@@ -16,11 +15,14 @@ var (
 	shift20   = archsimd.LoadInt32x4Array(&[4]int32{-20, -20, -20, -20})
 	shift7    = archsimd.LoadInt32x4Array(&[4]int32{7, 7, 7, 7})
 	shift25   = archsimd.LoadInt32x4Array(&[4]int32{-25, -25, -25, -25})
+
+	// djbSeq2 offsets the two 64-bit counter lanes within a NEON batch.
+	djbSeq2 = [2]uint64{0, 1}
 )
 
 // xorKeyStream is the arm64 SIMD backend hook. It XORs src with the key
 // stream generated from state and maintains leftover key stream state.
-func (cipher *CipherIetf) xorKeyStream(dst, src []byte) {
+func (cipher *Cipher) xorKeyStream(dst, src []byte) {
 	if len(src) > 64 {
 		cipher.xorKeyStreamNeon(dst, src)
 	} else {
@@ -29,14 +31,18 @@ func (cipher *CipherIetf) xorKeyStream(dst, src []byte) {
 }
 
 // xorKeyStreamNeon is the 4-block SIMD core. It XORs src with the key stream
-// generated from state (words 0-11 and 13-15 fixed, word 12 is the block
-// counter, advanced as blocks are produced) and returns the number of leftover
-// key stream bytes (0..63) stored at leftover[:n].
+// generated from state and returns the number of leftover key stream bytes
+// (0..63) stored at leftover[:n].
 //
 // It processes 4 blocks (256 bytes) per iteration. If the input is not a
 // multiple of 256 bytes, the final iteration produces the tail and any unused
 // key stream of the last partial block is retained.
-func (cipher *CipherIetf) xorKeyStreamNeon(dst, src []byte) {
+//
+// For the IETF layout the block counter lives in word 12 and the counter
+// vector is advanced with a single vector add per iteration. For the DJB
+// layout the 64-bit counter spans words 12-13, so a scalar counter is kept and
+// the low/high counter vectors are rebuilt from it each iteration.
+func (cipher *Cipher) xorKeyStreamNeon(dst, src []byte) {
 	// constant
 	i0 := archsimd.BroadcastUint32x4(constant[0])
 	i1 := archsimd.BroadcastUint32x4(constant[1])
@@ -51,16 +57,25 @@ func (cipher *CipherIetf) xorKeyStreamNeon(dst, src []byte) {
 	i9 := archsimd.BroadcastUint32x4(cipher.state[9])
 	i10 := archsimd.BroadcastUint32x4(cipher.state[10])
 	i11 := archsimd.BroadcastUint32x4(cipher.state[11])
-	// nonce
+	// word 13: nonce low for IETF, counter high for DJB
 	i13 := archsimd.BroadcastUint32x4(cipher.state[13])
+	// nonce
 	i14 := archsimd.BroadcastUint32x4(cipher.state[14])
 	i15 := archsimd.BroadcastUint32x4(cipher.state[15])
 
 	counterIncrement := archsimd.BroadcastUint32x4(4)
 	counter := archsimd.LoadUint32x4Array(&[4]uint32{cipher.state[12] + 0, cipher.state[12] + 1, cipher.state[12] + 2, cipher.state[12] + 3})
 
+	var djbCounter uint64
+	if cipher.djb {
+		djbCounter = cipher.counter()
+	}
+
 	// len(dst) is not needed but it removes bound checks
 	for len(src) >= 256 && len(dst) >= 256 {
+		if cipher.djb {
+			counter, i13 = djbCounterVectorsNeon(djbCounter)
+		}
 		w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
 			chacha4BlocksNeon(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, counter, i13, i14, i15)
 
@@ -90,15 +105,24 @@ func (cipher *CipherIetf) xorKeyStreamNeon(dst, src []byte) {
 
 		src = src[256:]
 		dst = dst[256:]
-		counter = counter.Add(counterIncrement)
+		if cipher.djb {
+			djbCounter += 4
+		} else {
+			counter = counter.Add(counterIncrement)
+		}
 	}
 
-	cipher.state[12] = counter.GetElem(0)
+	if !cipher.djb {
+		cipher.state[12] = counter.GetElem(0)
+	}
 
 	// Tail: < 256 bytes. Generate 4 blocks of key stream into a local
 	// buffer, XOR the consumed part, and keep the unused bytes of the last
 	// partial block as leftover (<= 63).
 	if len(src) > 0 {
+		if cipher.djb {
+			counter, i13 = djbCounterVectorsNeon(djbCounter)
+		}
 		var keystream [256]byte
 		w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15 :=
 			chacha4BlocksNeon(i0, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, counter, i13, i14, i15)
@@ -124,21 +148,29 @@ func (cipher *CipherIetf) xorKeyStreamNeon(dst, src []byte) {
 		w14.ReshapeToUint8s().Store(keystream[176:192])
 		w15.ReshapeToUint8s().Store(keystream[240:256])
 
-		n := min(len(src), 256)
-		subtle.XORBytes(dst, src, keystream[:n])
-		cipher.state[12] += uint32(n / 64)
+		cipher.processTail(dst, src, keystream[:], djbCounter)
+		return
+	}
 
-		if n%64 != 0 {
-			// n%64 != 0 here, so 64-n%64 is already ≤ 63; min makes that
-			// visible for bounds-check elision on cipher.leftover[:]
-			leftoverLen := min(64-n%64, 63)
-			copy(cipher.leftover[:leftoverLen], keystream[n:])
-			cipher.state[12] += 1
-			cipher.leftoverLen = uint8(leftoverLen)
-			return
-		}
+	if cipher.djb {
+		cipher.state[12] = uint32(djbCounter)
+		cipher.state[13] = uint32(djbCounter >> 32)
 	}
 	cipher.leftoverLen = 0
+}
+
+// djbCounterVectorsNeon builds the word-12 (counter low) and word-13 (counter
+// high) vectors for blocks c..c+3 in the DJB layout. The four 64-bit counters
+// are computed in SIMD as two Uint64x2 vectors, split into low/high 32-bit
+// words, and de-interleaved into the word-major layout NEON needs:
+// loV = [lo(c)..lo(c+3)], hiV = [hi(c)..hi(c+3)]. The 64-bit add carries into
+// the high word naturally, so no compare or branch is required.
+func djbCounterVectorsNeon(c uint64) (loV, hiV archsimd.Uint32x4) {
+	v0 := archsimd.BroadcastUint64x2(c).Add(archsimd.LoadUint64x2Array(&djbSeq2)) // [c, c+1]
+	v1 := v0.Add(archsimd.BroadcastUint64x2(2))                                   // [c+2, c+3]
+	a := v0.ReshapeToUint32s()                                                    // [lo(c), hi(c), lo(c+1), hi(c+1)]
+	b := v1.ReshapeToUint32s()                                                    // [lo(c+2), hi(c+2), lo(c+3), hi(c+3)]
+	return a.ConcatEven(b), a.ConcatOdd(b)                                        // VUZP1/VUZP2 -> low words, high words
 }
 
 // chacha4BlocksNeon computes 4 blocks of ChaCha20 key stream for the given

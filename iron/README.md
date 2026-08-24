@@ -400,3 +400,11 @@ relays, so you can observe the pure relayed path end to end.
 Running all on one machine works because same-host peers get a fast loopback
 connection; across the internet they connect through the relay (and directly
 when hole punching succeeds).
+
+
+## TODO
+
+- make relay a binary, not a library?
+- ensure that client batching is really usefull
+- quic / or http3 connection from endpoints to relay (will need to handle when clients migrate IP), fallback to websocket.
+

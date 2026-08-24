@@ -14,7 +14,7 @@ func BenchmarkFixed128(b *testing.B) {
 			b.Run("default", func(b *testing.B) {
 				b.SetBytes(int64(i))
 				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
+				for b.Loop() {
 					acc = HashString128(d)
 				}
 				runtime.KeepAlive(acc)
@@ -22,7 +22,7 @@ func BenchmarkFixed128(b *testing.B) {
 			b.Run("seed", func(b *testing.B) {
 				b.SetBytes(int64(i))
 				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
+				for b.Loop() {
 					acc = HashString128Seed(d, 42)
 				}
 				runtime.KeepAlive(acc)

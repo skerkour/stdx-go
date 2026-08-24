@@ -105,7 +105,7 @@ func benchmark(b *testing.B, name string) {
 
 		b.ResetTimer()
 
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			var v interface{}
 			err := yaml.Unmarshal(t.data, &v)
 			if len(t.error) > 0 {

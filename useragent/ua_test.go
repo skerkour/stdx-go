@@ -225,7 +225,7 @@ func TestSingle(t *testing.T) {
 var testUA ua.UserAgent
 
 func BenchmarkUserAgent(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		for _, test := range testTable {
 			testUA = ua.Parse(test[0])
 		}

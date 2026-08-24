@@ -60,7 +60,7 @@ func benchmarkEncrypt[C cipher.AEAD](b *testing.B, size int64, algorithm string,
 		b.ReportAllocs()
 		b.SetBytes(size)
 		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			cipher.Seal(dst, nonce, plaintext, associatedData)
 		}
 	})
@@ -75,7 +75,7 @@ func benchmarkDecrypt[C cipher.AEAD](b *testing.B, size int64, algorithm string,
 		cipherText = cipher.Seal(cipherText, nonce, plaintext, associatedData)
 		dst := make([]byte, len(cipherText))
 		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			cipher.Open(dst, nonce, cipherText, associatedData)
 		}
 	})

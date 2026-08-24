@@ -50,21 +50,21 @@ func TestParseHeaderListEmpty(t *testing.T) {
 
 func BenchmarkParseHeaderList(b *testing.B) {
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		parseHeaderList("header, second-header, THIRD-HEADER")
 	}
 }
 
 func BenchmarkParseHeaderListSingle(b *testing.B) {
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		parseHeaderList("header")
 	}
 }
 
 func BenchmarkParseHeaderListNormalized(b *testing.B) {
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		parseHeaderList("Header1, Header2, Third-Header")
 	}
 }
@@ -73,13 +73,13 @@ func BenchmarkWildcard(b *testing.B) {
 	w := wildcard{"foo", "bar"}
 	b.Run("match", func(b *testing.B) {
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			w.match("foobazbar")
 		}
 	})
 	b.Run("too short", func(b *testing.B) {
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			w.match("fobar")
 		}
 	})

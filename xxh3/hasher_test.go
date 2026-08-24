@@ -108,7 +108,7 @@ func BenchmarkHasher64(b *testing.B) {
 					b.ReportAllocs()
 					b.ResetTimer()
 					b.SetBytes(int64(size))
-					for i := 0; i < b.N; i++ {
+					for b.Loop() {
 						h.Reset()
 						h.Write(buf[:size])
 						_ = h.Sum64()
@@ -119,7 +119,7 @@ func BenchmarkHasher64(b *testing.B) {
 					b.ReportAllocs()
 					b.ResetTimer()
 					b.SetBytes(int64(size))
-					for i := 0; i < b.N; i++ {
+					for b.Loop() {
 						h.Reset()
 						h.Write(buf[:size])
 						_ = h.Sum64()
@@ -170,7 +170,7 @@ func BenchmarkHasher128(b *testing.B) {
 					b.ReportAllocs()
 					b.ResetTimer()
 					b.SetBytes(int64(size))
-					for i := 0; i < b.N; i++ {
+					for b.Loop() {
 						h.Reset()
 						h.Write(buf[:size])
 						_ = h.Sum128()
@@ -181,7 +181,7 @@ func BenchmarkHasher128(b *testing.B) {
 					b.ReportAllocs()
 					b.ResetTimer()
 					b.SetBytes(int64(size))
-					for i := 0; i < b.N; i++ {
+					for b.Loop() {
 						h.Reset()
 						h.Write(buf[:size])
 						_ = h.Sum128()

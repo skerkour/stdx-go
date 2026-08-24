@@ -638,7 +638,7 @@ var asString = "f47ac10b-58cc-0372-8567-0e02b2c3d479"
 var asBytes = []byte(asString)
 
 func BenchmarkParse(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := Parse(asString)
 		if err != nil {
 			b.Fatal(err)
@@ -647,7 +647,7 @@ func BenchmarkParse(b *testing.B) {
 }
 
 func BenchmarkParseBytes(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := ParseBytes(asBytes)
 		if err != nil {
 			b.Fatal(err)
@@ -661,7 +661,7 @@ func parseBytesUnsafe(b []byte) (UUID, error) {
 }
 
 func BenchmarkParseBytesUnsafe(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := parseBytesUnsafe(asBytes)
 		if err != nil {
 			b.Fatal(err)
@@ -675,7 +675,7 @@ func parseBytesCopy(b []byte) (UUID, error) {
 }
 
 func BenchmarkParseBytesCopy(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := parseBytesCopy(asBytes)
 		if err != nil {
 			b.Fatal(err)
@@ -684,7 +684,7 @@ func BenchmarkParseBytesCopy(b *testing.B) {
 }
 
 func BenchmarkNew(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		NewV4()
 	}
 }
@@ -694,7 +694,7 @@ func BenchmarkUUID_String(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if uuid.String() == "" {
 			b.Fatal("invalid uuid")
 		}
@@ -706,7 +706,7 @@ func BenchmarkUUID_URN(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if uuid.URN() == "" {
 			b.Fatal("invalid uuid")
 		}
@@ -715,7 +715,7 @@ func BenchmarkUUID_URN(b *testing.B) {
 
 func BenchmarkParseBadLength(b *testing.B) {
 	short := asString[:10]
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := Parse(short)
 		if err == nil {
 			b.Fatalf("expected ‘%s’ was invalid", short)
@@ -725,7 +725,7 @@ func BenchmarkParseBadLength(b *testing.B) {
 
 func BenchmarkParseLen32Truncated(b *testing.B) {
 	partial := asString[:len(asString)-4]
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := Parse(partial)
 		if err == nil {
 			b.Fatalf("expected ‘%s’ was invalid", partial)
@@ -735,7 +735,7 @@ func BenchmarkParseLen32Truncated(b *testing.B) {
 
 func BenchmarkParseLen36Corrupted(b *testing.B) {
 	wrong := asString[:len(asString)-1] + "x"
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, err := Parse(wrong)
 		if err == nil {
 			b.Fatalf("expected ‘%s’ was invalid", wrong)
@@ -776,7 +776,7 @@ func BenchmarkUUIDs_Strings(b *testing.B) {
 		b.Fatal(err)
 	}
 	uuids := UUIDs{uuid1, uuid2}
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		uuids.Strings()
 	}
 }

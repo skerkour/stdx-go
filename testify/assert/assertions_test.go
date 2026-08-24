@@ -2632,13 +2632,13 @@ func BenchmarkBytesEqual(b *testing.B) {
 
 	mockT := &mockFailNowTestingT{}
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		Equal(mockT, s, s2)
 	}
 }
 
 func BenchmarkNotNil(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		NotNil(b, b)
 	}
 }

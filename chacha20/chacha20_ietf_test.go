@@ -2,7 +2,6 @@ package chacha20
 
 import (
 	"bytes"
-	"crypto/cipher"
 	"testing"
 
 	xchacha20 "golang.org/x/crypto/chacha20"
@@ -44,7 +43,7 @@ func refXOR(t *testing.T, key, nonce []byte, counter uint32, src []byte) []byte 
 	return dst
 }
 
-func xorOneShot(c CipherIetf, src []byte) []byte {
+func xorOneShot(c Cipher, src []byte) []byte {
 	dst := make([]byte, len(src))
 	c.XORKeyStream(dst, src)
 	return dst
@@ -103,10 +102,6 @@ func hexVal(b byte) byte {
 	return 0
 }
 
-func TestCipherIetfStreamInterface(t *testing.T) {
-	var _ cipher.Stream = (*CipherIetf)(nil)
-}
-
 func TestCipherIetfCrossCheck(t *testing.T) {
 	key := testKey()
 	nonce := testNonce()
@@ -120,7 +115,7 @@ func TestCipherIetfCrossCheck(t *testing.T) {
 			ref := refXOR(t, key[:], nonce[:], counter, pt)
 
 			c := NewIetf(key, nonce)
-			c.SetCounter(counter)
+			c.SetCounter(uint64(counter))
 			got := xorOneShot(c, pt)
 			if !bytes.Equal(ref, got) {
 				t.Fatalf("cross-check mismatch: size=%d counter=%d", size, counter)
@@ -136,7 +131,7 @@ func TestCipherIetfCrossCheck(t *testing.T) {
 			ref := refXOR(t, key[:], nonce[:], counter, pt)
 
 			c := NewIetf(key, nonce)
-			c.SetCounter(counter)
+			c.SetCounter(uint64(counter))
 			got := xorOneShot(c, pt)
 			if !bytes.Equal(ref, got) {
 				t.Fatalf("high-counter mismatch: size=%d counter=%d", size, counter)

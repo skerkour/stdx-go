@@ -91,7 +91,7 @@ func BenchmarkUUID_MarshalJSON(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		js, err := json.Marshal(x)
 		if err != nil {
 			b.Fatalf("marshal json: %#v (%v)", js, err)
@@ -104,7 +104,7 @@ func BenchmarkUUID_UnmarshalJSON(b *testing.B) {
 	var x *struct {
 		UUID UUID `json:"uuid"`
 	}
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		err := json.Unmarshal(js, &x)
 		if err != nil {
 			b.Fatalf("marshal json: %#v (%v)", js, err)

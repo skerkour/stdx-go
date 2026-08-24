@@ -412,7 +412,7 @@ func BenchmarkBinaryMarshalRoundTrip(b *testing.B) {
 	for _, tc := range tests {
 		b.Run(tc.name, func(b *testing.B) {
 			ip := mustIP(tc.ip)
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				bt, err := ip.MarshalBinary()
 				if err != nil {
 					b.Fatal(err)
@@ -429,7 +429,7 @@ func BenchmarkBinaryMarshalRoundTrip(b *testing.B) {
 func BenchmarkStdIPv4(b *testing.B) {
 	b.ReportAllocs()
 	ips := []net.IP{}
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		ip := net.IPv4(8, 8, 8, 8)
 		ips = ips[:0]
 		for i := 0; i < 100; i++ {
@@ -441,7 +441,7 @@ func BenchmarkStdIPv4(b *testing.B) {
 func BenchmarkIPv4(b *testing.B) {
 	b.ReportAllocs()
 	ips := []IP{}
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		ip := IPv4(8, 8, 8, 8)
 		ips = ips[:0]
 		for i := 0; i < 100; i++ {
@@ -470,7 +470,7 @@ func newip4i_v4(a, b, c, d byte) ip4i {
 func BenchmarkIPv4_inline(b *testing.B) {
 	b.ReportAllocs()
 	ips := []ip4i{}
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		ip := newip4i_v4(8, 8, 8, 8)
 		ips = ips[:0]
 		for i := 0; i < 100; i++ {
@@ -482,7 +482,7 @@ func BenchmarkIPv4_inline(b *testing.B) {
 func BenchmarkStdIPv6(b *testing.B) {
 	b.ReportAllocs()
 	ips := []net.IP{}
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		ip := net.ParseIP("2001:db8::1")
 		ips = ips[:0]
 		for i := 0; i < 100; i++ {
@@ -494,7 +494,7 @@ func BenchmarkStdIPv6(b *testing.B) {
 func BenchmarkIPv6(b *testing.B) {
 	b.ReportAllocs()
 	ips := []IP{}
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		ip := mustIP("2001:db8::1")
 		ips = ips[:0]
 		for i := 0; i < 100; i++ {
@@ -601,7 +601,7 @@ func BenchmarkIPRangePrefixes(b *testing.B) {
 	b.ReportAllocs()
 	buf := make([]IPPrefix, 0, 50)
 	r := IPRange{mustIP("1.2.3.5"), mustIP("5.6.7.8")}
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = r.AppendPrefixes(buf[:0])
 	}
 }
@@ -822,7 +822,7 @@ func TestIPRangePrefix(t *testing.T) {
 func BenchmarkIPRangePrefix(b *testing.B) {
 	b.ReportAllocs()
 	r := IPRange{mustIP("10.0.0.0"), mustIP("10.0.0.255")}
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, ok := r.Prefix(); !ok {
 			b.Fatal("expected a prefix")
 		}
@@ -876,7 +876,7 @@ func TestAddrNextPrior(t *testing.T) {
 }
 
 func BenchmarkIPNextPrior(b *testing.B) {
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		doNextPrior(b)
 	}
 }

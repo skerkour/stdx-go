@@ -412,7 +412,7 @@ func benchmarkSplitLines(b *testing.B, count int) {
 	b.ResetTimer()
 
 	n := 0
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		n += len(SplitLines(str))
 	}
 }

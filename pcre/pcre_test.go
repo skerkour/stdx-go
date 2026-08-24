@@ -186,7 +186,7 @@ func BenchmarkStudyAndExec(b *testing.B) {
 	}
 	subj := []byte(`20-10-2023`)
 	m := re.NewMatcher(subj, 0)
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		m.MatchWFlags(subj, 0)
 		if m == nil {
 			b.Error("The match should be matched")
@@ -203,7 +203,7 @@ func BenchmarkExecJIT(b *testing.B) {
 	}
 	subj := []byte(`20-10-2023`)
 	m := re.NewMatcher(subj, 0)
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		m.MatchWFlags(subj, 0)
 		if m == nil {
 			b.Error("The match should be matched")
@@ -216,7 +216,7 @@ func BenchmarkExecWithoutStudy(b *testing.B) {
 	re := MustCompile(`/^(?:(?:31(\/|-|\.)(?:0?[13578]|1[02]))\1|(?:(?:29|30)(\/|-|\.)(?:0?[1,3-9]|1[0-2])\2))(?:(?:1[6-9]|[2-9]\d)?\d{2})$|^(?:29(\/|-|\.)0?2\3(?:(?:(?:1[6-9]|[2-9]\d)?(?:0[48]|[2468][048]|[13579][26])|(?:(?:16|[2468][048]|[3579][26])00))))$|^(?:0?[1-9]|1\d|2[0-8])(\/|-|\.)(?:(?:0?[1-9])|(?:1[0-2]))\4(?:(?:1[6-9]|[2-9]\d)?\d{2})$/`, 0)
 	subj := []byte(`20-10-2023`)
 	m := re.NewMatcher(subj, 0)
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		m.MatchWFlags(subj, 0)
 		if m == nil {
 			b.Error("The match should be matched")
