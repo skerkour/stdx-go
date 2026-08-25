@@ -25,8 +25,8 @@ func BenchmarkSum256(b *testing.B) {
 		{"zeebo", zeeboblake3.Sum256},
 		{"lukechampine", lukeblake3.Sum256},
 	}
-	for size := range []int{64, 4096, 64_000, 128_000} {
-		b.Run(strconv.Itoa(size), func(b *testing.B) {
+	for _, size := range []uint64{64, 4096, 64_000, 128_000} {
+		b.Run(strconv.FormatUint(size, 10), func(b *testing.B) {
 			in := data[:size]
 			for _, impl := range impls {
 				b.Run(impl.name, func(b *testing.B) {
