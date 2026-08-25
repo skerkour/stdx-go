@@ -218,6 +218,39 @@ func wordsFromLE(b []byte) [16]uint32 {
 	return w
 }
 
+// outputFromBlock builds the output node for a single-block hash (len(data) <=
+// blockLen) directly, without routing through the incremental chunk state. The
+// block is decoded from data with the tail zero-padded, the initial chaining
+// value is the mode key (no blocks compressed yet), and the flags carry both
+// CHUNK_START and CHUNK_END since the single block is the whole chunk. This is
+// the fast path for the small-input benchmarks.
+func outputFromBlock(data []byte, key [8]uint32, flags uint32) output {
+	var w [16]uint32
+	for i := 0; i < len(data)/4; i++ {
+		w[i] = binary.LittleEndian.Uint32(data[i*4:])
+	}
+	// Zero-fill the remaining words; partial final word handled below.
+	for i := len(data) / 4; i < 16; i++ {
+		w[i] = 0
+	}
+	// The final partial word, if any, is little-endian padded with zeros.
+	if rem := len(data) % 4; rem != 0 {
+		var last uint32
+		base := len(data) - rem
+		for i := 0; i < rem; i++ {
+			last |= uint32(data[base+i]) << (8 * uint(i))
+		}
+		w[len(data)/4] = last
+	}
+	return output{
+		inputCV:  key,
+		block:    w,
+		counter:  0,
+		blockLen: uint32(len(data)),
+		flags:    flags | flagChunkStart | flagChunkEnd,
+	}
+}
+
 // stackCVs is the number of chunk chaining values processed per batch in the
 // stack-buffered bulk paths (hashAll and Hasher.Write). Bounding the batch
 // keeps the CV scratch buffer a small, stack-allocated array no matter how
@@ -355,6 +388,9 @@ func compressOutputsScalar(out []byte, cv *[8]uint32, block *[16]uint32, blkLen,
 // byte-identical to the incremental Hasher.
 func hashAll(data []byte, key [8]uint32, flags uint32) output {
 	n := len(data)
+	if n <= blockLen {
+		return outputFromBlock(data, key, flags)
+	}
 	if n <= chunkLen {
 		cs := newChunkState(key, 0, flags)
 		cs.update(data)

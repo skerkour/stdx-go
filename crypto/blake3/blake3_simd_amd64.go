@@ -51,7 +51,14 @@ func fillChunkCVs(data []byte, cvs [][8]uint32, base uint64, key [8]uint32, flag
 			compressChunksAvx512(data, batch, base, cvs, key, flags, simdLanesAvx512, 16, true)
 		}
 		if batch < n {
-			compressChunksAvx512(data, batch, base, cvs, key, flags, n-batch, 16, true)
+			// A tail smaller than one AVX-512 batch wastes most of the 16
+			// lanes; route tails of up to 4 chunks to the 4-wide XMM kernel
+			// (all of whose ops run on AVX-512 CPUs too).
+			if rem := n - batch; rem <= 4 {
+				compressChunksAvx4(data, batch, base, cvs, key, flags, rem)
+			} else {
+				compressChunksAvx512(data, batch, base, cvs, key, flags, rem, 16, true)
+			}
 			return
 		}
 		return
@@ -60,7 +67,14 @@ func fillChunkCVs(data []byte, cvs [][8]uint32, base uint64, key [8]uint32, flag
 		compressChunksAvx2(data, batch, base, cvs, key, flags, simdLanes, 16, true)
 	}
 	if batch < n {
-		compressChunksAvx2(data, batch, base, cvs, key, flags, n-batch, 16, true)
+		rem := n - batch
+		if rem <= 4 {
+			// A 1-4 chunk tail: use the 4-wide XMM kernel so the round loop
+			// does not waste lanes on zero-filled data.
+			compressChunksAvx4(data, batch, base, cvs, key, flags, rem)
+		} else {
+			compressChunksAvx2(data, batch, base, cvs, key, flags, rem, 16, true)
+		}
 	}
 }
 
@@ -153,6 +167,45 @@ func rotr(x archsimd.Uint32x8, k uint64) archsimd.Uint32x8 {
 	return x.ShiftAllRight(k).Or(x.ShiftAllLeft(32 - k))
 }
 
+// The 128-bit (Uint32x4) rotation tables and helpers used by the 4-wide XMM
+// kernel for partial batches (fewer than 8 chunks).
+var (
+	rotr16Idx4 = [16]int8{
+		2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13,
+	}
+	rotr8Idx4 = [16]int8{
+		1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12,
+	}
+)
+
+func rotr16x4(x archsimd.Uint32x4) archsimd.Uint32x4 {
+	return x.ReshapeToUint8s().PermuteOrZero(archsimd.LoadInt8x16Array(&rotr16Idx4)).ReshapeToUint32s()
+}
+
+func rotr8x4(x archsimd.Uint32x4) archsimd.Uint32x4 {
+	return x.ReshapeToUint8s().PermuteOrZero(archsimd.LoadInt8x16Array(&rotr8Idx4)).ReshapeToUint32s()
+}
+
+func rotr4(x archsimd.Uint32x4, k uint64) archsimd.Uint32x4 {
+	return x.ShiftAllRight(k).Or(x.ShiftAllLeft(32 - k))
+}
+
+// gVec4 is the BLAKE3 quarter round on 4 lanes at once (the XMM partial-batch
+// kernel). As with gVec, the message is loaded with an array load written as
+// the leftmost single-use operand of the first VPADDD so it flows directly
+// from the load into the add without a spill-reload round trip.
+func gVec4(va, vb, vc, vd archsimd.Uint32x4, mx, my *[4]uint32) (archsimd.Uint32x4, archsimd.Uint32x4, archsimd.Uint32x4, archsimd.Uint32x4) {
+	va = archsimd.LoadUint32x4Array(mx).Add(va).Add(vb)
+	vd = rotr16x4(vd.Xor(va))
+	vc = vc.Add(vd)
+	vb = rotr4(vb.Xor(vc), 12)
+	va = archsimd.LoadUint32x4Array(my).Add(va).Add(vb)
+	vd = rotr8x4(vd.Xor(va))
+	vc = vc.Add(vd)
+	vb = rotr4(vb.Xor(vc), 7)
+	return va, vb, vc, vd
+}
+
 // gVec is the BLAKE3 quarter round on simdLanes lanes at once. The rotations
 // are right by 16/12/8/7, matching the scalar RotateLeft32(x, -k).
 //
@@ -164,11 +217,11 @@ func rotr(x archsimd.Uint32x8, k uint64) archsimd.Uint32x8 {
 // can) and re-materialized each round, exactly like the C reference kernel,
 // instead of occupying registers that would force the state to spill.
 func gVec(va, vb, vc, vd archsimd.Uint32x8, mx, my *[8]uint32) (archsimd.Uint32x8, archsimd.Uint32x8, archsimd.Uint32x8, archsimd.Uint32x8) {
-	va = va.Add(vb).Add(archsimd.LoadUint32x8(mx[:]))
+	va = archsimd.LoadUint32x8Array(mx).Add(va).Add(vb)
 	vd = rotr16(vd.Xor(va))
 	vc = vc.Add(vd)
 	vb = rotr(vb.Xor(vc), 12)
-	va = va.Add(vb).Add(archsimd.LoadUint32x8(my[:]))
+	va = archsimd.LoadUint32x8Array(my).Add(va).Add(vb)
 	vd = rotr8(vd.Xor(va))
 	vc = vc.Add(vd)
 	vb = rotr(vb.Xor(vc), 7)
@@ -178,6 +231,178 @@ func gVec(va, vb, vc, vd archsimd.Uint32x8, mx, my *[8]uint32) (archsimd.Uint32x
 // bcast returns a vector with x in every lane (a single VPBROADCASTD).
 func bcast(x uint32) archsimd.Uint32x8 {
 	return archsimd.BroadcastUint32x8(x)
+}
+
+// compressChunksAvx4 hashes the first `lanes` (1..4) full 1024-byte chunks at
+// indices base..base+lanes-1 with the 4-wide XMM (Uint32x4) kernel. It is used
+// for partial batches of 1-4 chunks, where running the 8-wide kernel would
+// waste half the lanes (and thus half the round-loop work on zero-filled
+// data). The message data is transposed into a lane-major stack buffer and read
+// through gVec4's array loads, mirroring the 8-wide kernel.
+func compressChunksAvx4(data []byte, base int, counterBase uint64, cvs [][8]uint32, key [8]uint32, flags uint32, lanes int) {
+	// Transpose the message data once: t[b][i][j] = little-endian word i of the
+	// 64-byte block b of chunk base+j, for the first `lanes` chunks.
+	var t [16][16][4]uint32
+	for b := 0; b < 16; b++ {
+		for j := 0; j < lanes; j++ {
+			blk := data[(base+j)*chunkLen+b*blockLen:]
+			for i := 0; i < 16; i++ {
+				t[b][i][j] = binary.LittleEndian.Uint32(blk[i*4:])
+			}
+		}
+	}
+
+	// Per-lane chunk counters (chunk index), split into low/high 32 bits.
+	var ctrLo, ctrHi [4]uint32
+	for j := 0; j < lanes; j++ {
+		c := counterBase + uint64(base+j)
+		ctrLo[j] = uint32(c)
+		ctrHi[j] = uint32(c >> 32)
+	}
+	vCtrLo := archsimd.LoadUint32x4(ctrLo[:])
+	vCtrHi := archsimd.LoadUint32x4(ctrHi[:])
+	vBlockLen := archsimd.BroadcastUint32x4(blockLen)
+
+	cv0 := archsimd.BroadcastUint32x4(key[0])
+	cv1 := archsimd.BroadcastUint32x4(key[1])
+	cv2 := archsimd.BroadcastUint32x4(key[2])
+	cv3 := archsimd.BroadcastUint32x4(key[3])
+	cv4 := archsimd.BroadcastUint32x4(key[4])
+	cv5 := archsimd.BroadcastUint32x4(key[5])
+	cv6 := archsimd.BroadcastUint32x4(key[6])
+	cv7 := archsimd.BroadcastUint32x4(key[7])
+	iv0 := archsimd.BroadcastUint32x4(iv[0])
+	iv1 := archsimd.BroadcastUint32x4(iv[1])
+	iv2 := archsimd.BroadcastUint32x4(iv[2])
+	iv3 := archsimd.BroadcastUint32x4(iv[3])
+
+	vFlagsStart := archsimd.BroadcastUint32x4(flags | flagChunkStart)
+	vFlagsMid := archsimd.BroadcastUint32x4(flags)
+	vFlagsEnd := archsimd.BroadcastUint32x4(flags | flagChunkEnd)
+
+	for b := 0; b < 16; b++ {
+		v15 := vFlagsMid
+		if b == 0 {
+			v15 = vFlagsStart
+		} else if b == 15 {
+			v15 = vFlagsEnd
+		}
+
+		v0, v1, v2, v3 := cv0, cv1, cv2, cv3
+		v4, v5, v6, v7 := cv4, cv5, cv6, cv7
+		v8, v9, v10, v11 := iv0, iv1, iv2, iv3
+		v12, v13, v14 := vCtrLo, vCtrHi, vBlockLen
+
+		// 7 unrolled rounds; each line is one gVec4 with the static message
+		// schedule index.
+		// round 0
+		v0, v4, v8, v12 = gVec4(v0, v4, v8, v12, &t[b][0], &t[b][1])
+		v1, v5, v9, v13 = gVec4(v1, v5, v9, v13, &t[b][2], &t[b][3])
+		v2, v6, v10, v14 = gVec4(v2, v6, v10, v14, &t[b][4], &t[b][5])
+		v3, v7, v11, v15 = gVec4(v3, v7, v11, v15, &t[b][6], &t[b][7])
+		v0, v5, v10, v15 = gVec4(v0, v5, v10, v15, &t[b][8], &t[b][9])
+		v1, v6, v11, v12 = gVec4(v1, v6, v11, v12, &t[b][10], &t[b][11])
+		v2, v7, v8, v13 = gVec4(v2, v7, v8, v13, &t[b][12], &t[b][13])
+		v3, v4, v9, v14 = gVec4(v3, v4, v9, v14, &t[b][14], &t[b][15])
+		// round 1
+		v0, v4, v8, v12 = gVec4(v0, v4, v8, v12, &t[b][2], &t[b][6])
+		v1, v5, v9, v13 = gVec4(v1, v5, v9, v13, &t[b][3], &t[b][10])
+		v2, v6, v10, v14 = gVec4(v2, v6, v10, v14, &t[b][7], &t[b][0])
+		v3, v7, v11, v15 = gVec4(v3, v7, v11, v15, &t[b][4], &t[b][13])
+		v0, v5, v10, v15 = gVec4(v0, v5, v10, v15, &t[b][1], &t[b][11])
+		v1, v6, v11, v12 = gVec4(v1, v6, v11, v12, &t[b][12], &t[b][5])
+		v2, v7, v8, v13 = gVec4(v2, v7, v8, v13, &t[b][9], &t[b][14])
+		v3, v4, v9, v14 = gVec4(v3, v4, v9, v14, &t[b][15], &t[b][8])
+		// round 2
+		v0, v4, v8, v12 = gVec4(v0, v4, v8, v12, &t[b][3], &t[b][4])
+		v1, v5, v9, v13 = gVec4(v1, v5, v9, v13, &t[b][10], &t[b][12])
+		v2, v6, v10, v14 = gVec4(v2, v6, v10, v14, &t[b][13], &t[b][2])
+		v3, v7, v11, v15 = gVec4(v3, v7, v11, v15, &t[b][7], &t[b][14])
+		v0, v5, v10, v15 = gVec4(v0, v5, v10, v15, &t[b][6], &t[b][5])
+		v1, v6, v11, v12 = gVec4(v1, v6, v11, v12, &t[b][9], &t[b][0])
+		v2, v7, v8, v13 = gVec4(v2, v7, v8, v13, &t[b][11], &t[b][15])
+		v3, v4, v9, v14 = gVec4(v3, v4, v9, v14, &t[b][8], &t[b][1])
+		// round 3
+		v0, v4, v8, v12 = gVec4(v0, v4, v8, v12, &t[b][10], &t[b][7])
+		v1, v5, v9, v13 = gVec4(v1, v5, v9, v13, &t[b][12], &t[b][9])
+		v2, v6, v10, v14 = gVec4(v2, v6, v10, v14, &t[b][14], &t[b][3])
+		v3, v7, v11, v15 = gVec4(v3, v7, v11, v15, &t[b][13], &t[b][15])
+		v0, v5, v10, v15 = gVec4(v0, v5, v10, v15, &t[b][4], &t[b][0])
+		v1, v6, v11, v12 = gVec4(v1, v6, v11, v12, &t[b][11], &t[b][2])
+		v2, v7, v8, v13 = gVec4(v2, v7, v8, v13, &t[b][5], &t[b][8])
+		v3, v4, v9, v14 = gVec4(v3, v4, v9, v14, &t[b][1], &t[b][6])
+		// round 4
+		v0, v4, v8, v12 = gVec4(v0, v4, v8, v12, &t[b][12], &t[b][13])
+		v1, v5, v9, v13 = gVec4(v1, v5, v9, v13, &t[b][9], &t[b][11])
+		v2, v6, v10, v14 = gVec4(v2, v6, v10, v14, &t[b][15], &t[b][10])
+		v3, v7, v11, v15 = gVec4(v3, v7, v11, v15, &t[b][14], &t[b][8])
+		v0, v5, v10, v15 = gVec4(v0, v5, v10, v15, &t[b][7], &t[b][2])
+		v1, v6, v11, v12 = gVec4(v1, v6, v11, v12, &t[b][5], &t[b][3])
+		v2, v7, v8, v13 = gVec4(v2, v7, v8, v13, &t[b][0], &t[b][1])
+		v3, v4, v9, v14 = gVec4(v3, v4, v9, v14, &t[b][6], &t[b][4])
+		// round 5
+		v0, v4, v8, v12 = gVec4(v0, v4, v8, v12, &t[b][9], &t[b][14])
+		v1, v5, v9, v13 = gVec4(v1, v5, v9, v13, &t[b][11], &t[b][5])
+		v2, v6, v10, v14 = gVec4(v2, v6, v10, v14, &t[b][8], &t[b][12])
+		v3, v7, v11, v15 = gVec4(v3, v7, v11, v15, &t[b][15], &t[b][1])
+		v0, v5, v10, v15 = gVec4(v0, v5, v10, v15, &t[b][13], &t[b][3])
+		v1, v6, v11, v12 = gVec4(v1, v6, v11, v12, &t[b][0], &t[b][10])
+		v2, v7, v8, v13 = gVec4(v2, v7, v8, v13, &t[b][2], &t[b][6])
+		v3, v4, v9, v14 = gVec4(v3, v4, v9, v14, &t[b][4], &t[b][7])
+		// round 6
+		v0, v4, v8, v12 = gVec4(v0, v4, v8, v12, &t[b][11], &t[b][15])
+		v1, v5, v9, v13 = gVec4(v1, v5, v9, v13, &t[b][5], &t[b][0])
+		v2, v6, v10, v14 = gVec4(v2, v6, v10, v14, &t[b][1], &t[b][9])
+		v3, v7, v11, v15 = gVec4(v3, v7, v11, v15, &t[b][8], &t[b][6])
+		v0, v5, v10, v15 = gVec4(v0, v5, v10, v15, &t[b][14], &t[b][10])
+		v1, v6, v11, v12 = gVec4(v1, v6, v11, v12, &t[b][2], &t[b][12])
+		v2, v7, v8, v13 = gVec4(v2, v7, v8, v13, &t[b][3], &t[b][4])
+		v3, v4, v9, v14 = gVec4(v3, v4, v9, v14, &t[b][7], &t[b][13])
+
+		cv0 = v0.Xor(v8)
+		cv1 = v1.Xor(v9)
+		cv2 = v2.Xor(v10)
+		cv3 = v3.Xor(v11)
+		cv4 = v4.Xor(v12)
+		cv5 = v5.Xor(v13)
+		cv6 = v6.Xor(v14)
+		cv7 = v7.Xor(v15)
+	}
+
+	// Scatter lane j of each CV word back to chunk base+j.
+	var lane [4]uint32
+	cv0.Store(lane[:])
+	for j := 0; j < lanes; j++ {
+		cvs[base+j][0] = lane[j]
+	}
+	cv1.Store(lane[:])
+	for j := 0; j < lanes; j++ {
+		cvs[base+j][1] = lane[j]
+	}
+	cv2.Store(lane[:])
+	for j := 0; j < lanes; j++ {
+		cvs[base+j][2] = lane[j]
+	}
+	cv3.Store(lane[:])
+	for j := 0; j < lanes; j++ {
+		cvs[base+j][3] = lane[j]
+	}
+	cv4.Store(lane[:])
+	for j := 0; j < lanes; j++ {
+		cvs[base+j][4] = lane[j]
+	}
+	cv5.Store(lane[:])
+	for j := 0; j < lanes; j++ {
+		cvs[base+j][5] = lane[j]
+	}
+	cv6.Store(lane[:])
+	for j := 0; j < lanes; j++ {
+		cvs[base+j][6] = lane[j]
+	}
+	cv7.Store(lane[:])
+	for j := 0; j < lanes; j++ {
+		cvs[base+j][7] = lane[j]
+	}
 }
 
 // compressChunksAvx2 hashes the first `lanes` (1..simdLanes) full 1024-byte

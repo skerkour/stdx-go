@@ -57,4 +57,16 @@ func TestAVX2PathCrossCheck(t *testing.T) {
 	if !bytes.Equal(simdOut[:], scalarOut[:]) {
 		t.Fatal("compressOutputsLanes != scalar")
 	}
+
+	// 4-wide XMM kernel vs scalar, for a partial batch of 4 chunks.
+	var simdCV4, scalarCV4 [4][8]uint32
+	compressChunksAvx4(data, 0, 0, simdCV4[:], key, 0, 4)
+	for i := 0; i < 4; i++ {
+		scalarCV4[i] = compressChunkCV(data, i, 0, key, 0)
+	}
+	for i := 0; i < 4; i++ {
+		if simdCV4[i] != scalarCV4[i] {
+			t.Fatalf("4-wide chunk %d: SIMD %x scalar %x", i, simdCV4[i], scalarCV4[i])
+		}
+	}
 }

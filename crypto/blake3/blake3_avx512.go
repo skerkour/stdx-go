@@ -164,17 +164,17 @@ func bcast512(x uint32) archsimd.Uint32x16 {
 // VPRORVD against the loop-invariant count vectors r16/r12/r8/r7.
 //
 // mx and my point at the lane-major message rows for the two message words of
-// this column; the message is loaded from memory here rather than passed as
-// vectors. The 16 state vectors plus the 4 rotation-count vectors already fill
-// most of the 32 ZMM registers, so keeping the 16 message words as memory
-// operands (folding into VPADDD where the compiler can) avoids spilling state,
-// matching the C reference kernel.
+// this column. The 16 state vectors plus the 4 rotation-count vectors already
+// fill most of the 32 ZMM registers. The message is loaded with an array load
+// (no bounds-checked slice header) written as the leftmost, single-use operand
+// of the first VPADDD, so the compiler consumes it directly from the load
+// without routing it through a spill slot and reloading it.
 func gVec512(va, vb, vc, vd archsimd.Uint32x16, mx, my *[16]uint32, r16, r12, r8, r7 archsimd.Uint32x16) (archsimd.Uint32x16, archsimd.Uint32x16, archsimd.Uint32x16, archsimd.Uint32x16) {
-	va = va.Add(vb).Add(archsimd.LoadUint32x16(mx[:]))
+	va = archsimd.LoadUint32x16Array(mx).Add(va).Add(vb)
 	vd = vd.Xor(va).RotateRight(r16)
 	vc = vc.Add(vd)
 	vb = vb.Xor(vc).RotateRight(r12)
-	va = va.Add(vb).Add(archsimd.LoadUint32x16(my[:]))
+	va = archsimd.LoadUint32x16Array(my).Add(va).Add(vb)
 	vd = vd.Xor(va).RotateRight(r8)
 	vc = vc.Add(vd)
 	vb = vb.Xor(vc).RotateRight(r7)
